@@ -14,7 +14,7 @@ Everything is reachable with the mouse. The menu bar (File, Edit, Format, View, 
 
 **Ctrl+F** opens a find bar above the text with a live match count, previous/next buttons (**Enter** / **Shift+Enter**), a match-case toggle and every match highlighted; the Replace button expands a replace row. **Ctrl+click** opens a link. **Ctrl+K** wraps the selection as a link and selects the address for typing. **Settings** (Edit menu, **Ctrl+,**) is a dialog with a Light/Dark/System theme, accent swatches, font pickers that preview each font, steppers and toggles. **Edit > Keyboard shortcuts** remaps a command by clicking it and pressing the new keys. Drag the dividers between split panes to resize them, or drag a tab to any pane edge to split there. **File > Open recent folder** reopens earlier workspaces.
 
-Other shortcuts: **Ctrl+O** opens a workspace, **Ctrl+P** or **Ctrl+Shift+L** opens files, **Ctrl+Shift+P** lists commands, **F11** enters focus mode and **Esc** exits.
+**Ctrl+G** goes to a line, **Word count** (View menu) counts the selection or the whole file, and **File > Export as HTML** writes `name.html` beside the Markdown file. Other shortcuts: **Ctrl+O** opens a workspace, **Ctrl+P** or **Ctrl+Shift+L** opens files, **Ctrl+Shift+P** lists commands, **F11** enters focus mode and **Esc** exits.
 
 The session (tabs, splits, panel sizes, recent folders, window position and size) is saved a few seconds after each change, so a crash loses almost nothing.
 
@@ -32,7 +32,7 @@ Install stable Rust and Visual Studio C++ Build Tools, then run:
 
 This workspace has a project-local Rust toolchain under `.tools`; the build script detects it. Rust is not needed to run the executable.
 
-The 16 tests cover Unicode and line endings, undo and saved-state tracking, parsing and incremental indexes, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
+The 17 tests cover Unicode and line endings, undo and saved-state tracking, parsing and incremental indexes, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
 
 The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 1100x760 and 2560x1440. Each case includes a full block index and measures 220 warmed edit and scroll samples through viewport parsing, shaping, CPU rasterization and framebuffer copy. `performance-results.json` records results and fails the gate above 5 ms per edit or a 60 Hz scroll budget. OS presentation, background scanning, display latency and truly cold disk caches are outside that benchmark.
 
@@ -42,4 +42,4 @@ The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 110
 
 Preview is bounded to physical lines and 512-character chunks. Inline formatting crossing those boundaries and Setext headings do not have complete CommonMark styling; the original source stays intact. Fenced code state and ATX headings are indexed across the document. Large-file processing measurements are machine-specific and do not certify every possible document or frame.
 
-The platform module includes macOS paths and Cmd shortcuts, but this build has only been compiled and tested on Windows. Actual Japanese/Chinese/Korean OS input-method interaction still needs manual validation; automated tests cover preedit/commit handling. The app icon remains an open item from the spec. Rendered tables, images, math, export, sync and the other excluded v1 features are omitted.
+The platform module includes macOS paths and Cmd shortcuts, but this build has only been compiled and tested on Windows. Actual Japanese/Chinese/Korean OS input-method interaction still needs manual validation; automated tests cover preedit/commit handling. The app icon remains an open item from the spec. Rendered tables, images, math, PDF export, sync and the other excluded v1 features are omitted.

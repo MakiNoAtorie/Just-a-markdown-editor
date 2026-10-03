@@ -424,6 +424,19 @@ impl Document {
     }
 }
 
+/// Whitespace-separated words, like `str::split_whitespace().count()` but without copying the rope.
+pub fn word_count(text: ropey::RopeSlice) -> usize {
+    let mut inside = false;
+    text.chars()
+        .filter(|c| {
+            let word = !c.is_whitespace();
+            let start = word && !inside;
+            inside = word;
+            start
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +493,12 @@ mod tests {
         doc.undo();
         doc.redo();
         assert_eq!(doc.selection(), selected);
+    }
+    #[test]
+    fn counts_words_across_whitespace_and_chunks() {
+        assert_eq!(word_count(Rope::from_str("").slice(..)), 0);
+        assert_eq!(word_count(Rope::from_str(" a  b\r\nc\t").slice(..)), 3);
+        let long = "word ".repeat(5000);
+        assert_eq!(word_count(Rope::from_str(&long).slice(..)), 5000);
     }
 }

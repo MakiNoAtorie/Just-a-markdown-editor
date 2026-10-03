@@ -6,6 +6,7 @@ pub enum Kind {
     Palette,
     QuickOpen,
     Headings,
+    GotoLine,
     HeadingLevels,
     Find,
     Replace,
@@ -98,6 +99,7 @@ impl Overlay {
             Kind::Keymap => "Keyboard shortcuts",
             Kind::Setting(_) => "Choose a font",
             Kind::Shortcut(_) => "Change shortcut",
+            Kind::GotoLine => "Go to line",
             Kind::Create => "New Markdown file",
             Kind::Rename(_) => "Rename",
             Kind::CreateFolder => "New folder",
@@ -115,6 +117,7 @@ impl Overlay {
             Kind::Setting(_) => "Type to filter fonts…",
             Kind::Keymap => "Filter commands…",
             Kind::Recent => "Type a folder name…",
+            Kind::GotoLine => "Line number",
             Kind::Create | Kind::Rename(_) | Kind::CreateFolder => "folder/name.md",
             _ => "",
         }
@@ -125,6 +128,7 @@ impl Overlay {
             self.kind,
             Kind::Settings
                 | Kind::Shortcut(_)
+                | Kind::GotoLine
                 | Kind::Create
                 | Kind::CreateFolder
                 | Kind::Rename(_)

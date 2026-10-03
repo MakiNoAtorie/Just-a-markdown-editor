@@ -1433,6 +1433,11 @@ impl App {
                 false,
                 vec![("Cancel", Act::Press("escape"), Look::Outline), ("Move to Recycle Bin", Act::Press("enter"), Look::Danger)],
             ),
+            Kind::GotoLine => (
+                "Enter a line number.".into(),
+                true,
+                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Go", Act::Press("enter"), Look::Primary)],
+            ),
             Kind::Create => (
                 "Name the new note. It is created inside the workspace,
 and .md is added if you leave it out.".into(),

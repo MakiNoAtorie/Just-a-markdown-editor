@@ -32,6 +32,9 @@ pub enum Command {
     Palette,
     QuickOpen,
     JumpHeading,
+    GotoLine,
+    WordCount,
+    ExportHtml,
     Find,
     Replace,
     FolderSearch,
@@ -143,6 +146,9 @@ commands![
         "Jump to heading",
         "Ctrl+J"
     ),
+    (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
+    (Command::WordCount, "word_count", "Word count", ""),
+    (Command::ExportHtml, "export_html", "Export as HTML", ""),
     (Command::Find, "find", "Find…", "Ctrl+F"),
     (Command::Replace, "replace", "Replace…", "Ctrl+H"),
     (

@@ -17,6 +17,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::Save),
             Some(Command::SaveAs),
             Some(Command::Reload),
+            Some(Command::ExportHtml),
             None,
             Some(Command::CreateFile),
             Some(Command::CreateFolder),
@@ -88,6 +89,8 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::NextTab),
             Some(Command::PreviousTab),
             Some(Command::JumpHeading),
+            Some(Command::GotoLine),
+            Some(Command::WordCount),
         ],
     ),
     (

@@ -1399,6 +1399,19 @@ impl App {
         }
         self.redraw();
     }
+    fn goto_line(&mut self, query: &str) {
+        let Ok(line) = query.trim().parse::<usize>() else {
+            self.note("Enter a line number.");
+            return;
+        };
+        if let Some(tab) = self.active_id().and_then(|id| self.tabs.get_mut(&id)) {
+            let text = &tab.document.text;
+            let position = text.line_to_char(line.saturating_sub(1).min(text.len_lines() - 1));
+            tab.document.select(position, false);
+            tab.view.top = position;
+        }
+        self.overlay = None;
+    }
     fn submit_name(&mut self, kind: Kind, query: String) {
         let text = query.trim().replace('\\', "/");
         if text.is_empty() || text.ends_with('/') {
@@ -1653,6 +1666,7 @@ impl App {
                     self.overlay = None;
                     self.operation(FileOp::Delete(path));
                 }
+                Kind::GotoLine => self.goto_line(&query),
                 Kind::Create | Kind::CreateFolder | Kind::Rename(_) => self.submit_name(kind, query),
                 Kind::Replace if primary || overlay.secondary => self.replace(primary),
                 Kind::Find | Kind::Replace => {
@@ -1890,6 +1904,51 @@ impl App {
             Command::Palette => self.show(Kind::Palette),
             Command::QuickOpen => self.show(Kind::QuickOpen),
             Command::JumpHeading => self.show(Kind::Headings),
+            Command::GotoLine => self.show(Kind::GotoLine),
+            Command::WordCount => {
+                if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
+                    let doc = &tab.document;
+                    let range = doc.selection();
+                    let (text, what) = if range.is_empty() {
+                        (doc.text.slice(..), "")
+                    } else {
+                        (doc.text.slice(range), " selected")
+                    };
+                    self.status = format!(
+                        "{} words · {} characters{what}",
+                        crate::core::buffer::word_count(text),
+                        text.len_chars()
+                    );
+                }
+            }
+            Command::ExportHtml => {
+                if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
+                    let (Some(storage), Some(path)) = (&tab.storage, &tab.path) else {
+                        self.status = "Save the file first, then export it.".into();
+                        return;
+                    };
+                    let (storage, text, proxy) =
+                        (storage.clone(), tab.document.text.clone(), self.proxy.clone());
+                    let path = path.with_extension("html");
+                    std::thread::spawn(move || {
+                        let title = path.file_stem().unwrap_or_default().to_string_lossy();
+                        let title = title.replace('&', "&amp;").replace('<', "&lt;");
+                        let mut html = format!(
+                            "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>{title}</title>\n<style>body{{max-width:44rem;margin:2rem auto;padding:0 1rem;font:16px/1.6 system-ui,sans-serif}}pre,code{{background:#8881}}pre{{padding:.75rem;overflow:auto}}table{{border-collapse:collapse}}td,th{{border:1px solid #8886;padding:.25rem .5rem}}</style>\n"
+                        );
+                        let options = pulldown_cmark::Options::ENABLE_TABLES
+                            | pulldown_cmark::Options::ENABLE_STRIKETHROUGH
+                            | pulldown_cmark::Options::ENABLE_TASKLISTS;
+                        let source = text.to_string();
+                        pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new_ext(&source, options));
+                        let message = match storage.write(&path, &Rope::from_str(&html)) {
+                            Ok(()) => format!("Exported {}", path.display()),
+                            Err(error) => format!("Cannot export: {error}"),
+                        };
+                        let _ = proxy.send_event(UserEvent::Error(message));
+                    });
+                }
+            }
             Command::Find => self.show(Kind::Find),
             Command::Replace => self.show(Kind::Replace),
             Command::FolderSearch => self.show(Kind::FolderSearch),
