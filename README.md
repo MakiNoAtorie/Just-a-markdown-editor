@@ -18,7 +18,7 @@ Everything is reachable with the mouse. The menu bar (File, Edit, Format, View, 
 
 The session (tabs, splits, panel sizes, recent folders, window position and size) is saved a few seconds after each change, so a crash loses almost nothing.
 
-The editor includes inline preview, clickable tasks, Unicode and composed-input handling, operation-based undo, tabs and nested splits, tab dragging, a folder tree, a collapsible outline, fuzzy navigation, file find/replace and workspace search. Tables remain monospace source. Autosave runs after a 700 ms pause; **Ctrl+S** saves immediately. Saving uses atomic replacement and checks for external changes. When a conflict appears, **Ctrl+S** keeps your edits and **Ctrl+R** loads the external version; both commands can be remapped.
+The editor includes inline preview, clickable tasks, Unicode and composed-input handling, operation-based undo, tabs and nested splits, tab dragging, a folder tree, a collapsible outline, fuzzy navigation, file find/replace and workspace search. Pipe tables are drawn as a grid (monospace, aligned columns, bold header); the row holding the cursor shows its source so you can edit it. Autosave runs after a 700 ms pause; **Ctrl+S** saves immediately. Saving uses atomic replacement and checks for external changes. When a conflict appears, **Ctrl+S** keeps your edits and **Ctrl+R** loads the external version; both commands can be remapped.
 
 `settings.toml` and `session.toml` are created beside the executable. Keep the program in a writable folder. Settings are human-editable TOML and reload when changed. Session state restores the workspace, tabs, splits and cursors, including files saved outside the workspace. Unsaved drafts ask to be saved or discarded on close. Markdown files are the only document storage.
 
@@ -32,7 +32,7 @@ Install stable Rust and Visual Studio C++ Build Tools, then run:
 
 This workspace has a project-local Rust toolchain under `.tools`; the build script detects it. Rust is not needed to run the executable.
 
-The 17 tests cover Unicode and line endings, undo and saved-state tracking, parsing and incremental indexes, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
+The 18 tests cover Unicode and line endings, undo and saved-state tracking, parsing and incremental indexes, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
 
 The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 1100x760 and 2560x1440. Each case includes a full block index and measures 220 warmed edit and scroll samples through viewport parsing, shaping, CPU rasterization and framebuffer copy. `performance-results.json` records results and fails the gate above 5 ms per edit or a 60 Hz scroll budget. OS presentation, background scanning, display latency and truly cold disk caches are outside that benchmark.
 
@@ -40,6 +40,6 @@ The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 110
 
 ## Implementation limits
 
-Preview is bounded to physical lines and 512-character chunks. Inline formatting crossing those boundaries and Setext headings do not have complete CommonMark styling; the original source stays intact. Fenced code state and ATX headings are indexed across the document. Large-file processing measurements are machine-specific and do not certify every possible document or frame.
+Tables ignore the `:--:` alignment markers, are drawn only when the whole grid fits the pane width (wider ones stay as source) and pad by character count, so wide CJK text may misalign. Preview is bounded to physical lines and 512-character chunks. Inline formatting crossing those boundaries and Setext headings do not have complete CommonMark styling; the original source stays intact. Fenced code state and ATX headings are indexed across the document. Large-file processing measurements are machine-specific and do not certify every possible document or frame.
 
-The platform module includes macOS paths and Cmd shortcuts, but this build has only been compiled and tested on Windows. Actual Japanese/Chinese/Korean OS input-method interaction still needs manual validation; automated tests cover preedit/commit handling. The app icon remains an open item from the spec. Rendered tables, images, math, PDF export, sync and the other excluded v1 features are omitted.
+The platform module includes macOS paths and Cmd shortcuts, but this build has only been compiled and tested on Windows. Actual Japanese/Chinese/Korean OS input-method interaction still needs manual validation; automated tests cover preedit/commit handling. The app icon remains an open item from the spec. Images, math, PDF export, sync and the other excluded v1 features are omitted.

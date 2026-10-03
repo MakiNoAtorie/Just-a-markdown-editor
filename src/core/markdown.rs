@@ -11,6 +11,10 @@ pub struct Style {
     pub link: bool,
     pub dim: bool,
     pub heading: u8,
+    /// Monospace without the code background; used by table cells.
+    pub mono: bool,
+    /// A table column separator, drawn as a line instead of text.
+    pub border: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Span {
@@ -27,6 +31,7 @@ pub struct Presentation {
     pub tasks: Vec<(usize, usize, bool)>,
     pub rules: Vec<usize>,
     pub quote: bool,
+    pub row: Option<RowKind>,
     pub start: usize,
     pub end: usize,
 }
@@ -367,6 +372,147 @@ pub fn present(
     output
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RowKind {
+    Header,
+    Delimiter,
+    Body,
+    Last,
+}
+/// Where a table row's cells and pipes sit in the line, as byte offsets.
+struct Row {
+    cells: Vec<Range<usize>>,
+    /// Pipe before each cell; `None` for the first cell of a row without a leading pipe.
+    left: Vec<Option<usize>>,
+    /// Closing pipe, if the row has one.
+    right: Option<usize>,
+    /// Length of the line without its line ending.
+    body: usize,
+}
+fn split_row(line: &str) -> Option<Row> {
+    let body = line.trim_end_matches(['\r', '\n']);
+    let pipes: Vec<usize> = body
+        .char_indices()
+        .filter(|&(i, c)| c == '|' && !body[..i].ends_with('\\'))
+        .map(|(i, _)| i)
+        .collect();
+    if pipes.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut from = 0;
+    for &pipe in &pipes {
+        segments.push((from, pipe));
+        from = pipe + 1;
+    }
+    segments.push((from, body.len()));
+    let blank = |(a, b): (usize, usize)| body[a..b].trim().is_empty();
+    let lead = blank(segments[0]);
+    let trail = segments.len() > 1 && blank(segments[segments.len() - 1]);
+    let mut row = Row {
+        cells: Vec::new(),
+        left: Vec::new(),
+        right: trail.then(|| pipes[pipes.len() - 1]),
+        body: body.len(),
+    };
+    for k in usize::from(lead)..segments.len() - usize::from(trail) {
+        let (a, b) = segments[k];
+        let text = &body[a..b];
+        let start = a + text.len() - text.trim_start().len();
+        row.cells.push(start..start.max(b - (text.len() - text.trim_end().len())));
+        row.left.push((k > 0).then(|| pipes[k - 1]));
+    }
+    Some(row)
+}
+/// The `|---|:--:|` line that turns the line above it into a table header.
+pub fn is_delimiter(line: &str) -> bool {
+    split_row(line).is_some_and(|row| {
+        !row.cells.is_empty()
+            && row.cells.iter().all(|cell| {
+                let cell = &line[cell.clone()];
+                cell.contains('-') && cell.chars().all(|c| matches!(c, '-' | ':'))
+            })
+    })
+}
+/// Width in characters of each column, measured on what is shown (inline markers hidden).
+pub fn column_widths<'a>(rows: impl Iterator<Item = &'a str>) -> Vec<usize> {
+    let mut widths: Vec<usize> = Vec::new();
+    for line in rows {
+        let Some(row) = split_row(line) else { continue };
+        for (k, cell) in row.cells.iter().enumerate() {
+            let width = present(&line[cell.clone()], 0, None, false, false).text.chars().count();
+            if k == widths.len() {
+                widths.push(width);
+            } else {
+                widths[k] = widths[k].max(width);
+            }
+        }
+    }
+    widths.iter_mut().for_each(|w| *w = (*w).max(3));
+    widths
+}
+fn push(out: &mut Presentation, text: &str, style: Style, source: Option<usize>) {
+    let at = out.text.len();
+    if let Some(char_index) = source {
+        out.source.push((at, char_index));
+    }
+    out.text.push_str(text);
+    match out.spans.last_mut() {
+        Some(span) if span.style == style && span.bytes.end == at => span.bytes.end = out.text.len(),
+        _ => out.spans.push(Span { bytes: at..out.text.len(), style }),
+    }
+}
+/// One table row as padded monospace cells. Column separators are blank border characters, which
+/// the editor replaces with drawn lines. Every character maps back to the source line.
+pub fn present_table_row(line: &str, start: usize, kind: RowKind, widths: &[usize]) -> Presentation {
+    let Some(row) = split_row(line) else {
+        return present(line, start, None, false, false);
+    };
+    let mut out = Presentation {
+        start,
+        end: start + line.chars().count(),
+        row: Some(kind),
+        ..Default::default()
+    };
+    let at = |byte: usize| start + line[..byte].chars().count();
+    let (border, plain) = (
+        Style { border: true, mono: true, ..Default::default() },
+        Style { mono: true, ..Default::default() },
+    );
+    let close = row.right.unwrap_or(row.body);
+    for k in 0..widths.len().max(row.cells.len()) {
+        let cell = row.cells.get(k).cloned().unwrap_or(close..close);
+        let left = match row.left.get(k) {
+            Some(pipe) => pipe.unwrap_or(0),
+            None => close,
+        };
+        push(&mut out, " ", border, Some(at(left)));
+        push(&mut out, " ", plain, None);
+        let mut used = 0;
+        if kind != RowKind::Delimiter && !cell.is_empty() {
+            let shown = present(&line[cell.clone()], at(cell.start), None, false, false);
+            let base = out.text.len();
+            out.source.extend(shown.source[..shown.source.len() - 1].iter().map(|&(b, c)| (b + base, c)));
+            for span in &shown.spans {
+                out.spans.push(Span {
+                    bytes: span.bytes.start + base..span.bytes.end + base,
+                    style: Style { mono: true, bold: span.style.bold || kind == RowKind::Header, ..span.style },
+                });
+            }
+            out.text.push_str(&shown.text);
+            used = shown.text.chars().count();
+        }
+        let pad = widths.get(k).map_or(0, |w| w.saturating_sub(used)) + 1;
+        push(&mut out, &" ".repeat(pad), plain, Some(at(cell.end)));
+    }
+    push(&mut out, " ", border, Some(at(close)));
+    for (i, c) in line[row.body..].chars().enumerate() {
+        push(&mut out, &c.to_string(), plain, Some(at(row.body) + i));
+    }
+    out.source.push((out.text.len(), out.end));
+    out
+}
+
 /// The link under character column `col` of a line: `[text](url)` or a bare http(s) address.
 pub fn link_at(line: &str, col: usize) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
@@ -455,6 +601,20 @@ pub fn format_at(line: &str, col: usize) -> Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn table_rows_share_column_widths_and_map_back_to_source() {
+        assert!(is_delimiter("|:--|---:|") && !is_delimiter("a|b") && !is_delimiter("| a | b |"));
+        let widths = column_widths(["| a | bbb |", "|**cc**|d|"].into_iter());
+        assert_eq!(widths, [3, 3]);
+        let widths = [5, 3];
+        let a = present_table_row("| **ab** | c |\r\n", 10, RowKind::Body, &widths);
+        let b = present_table_row("x|yy\n", 0, RowKind::Body, &widths);
+        assert_eq!(a.text.chars().count(), b.text.chars().count() + 1);
+        assert!(a.text.contains("ab") && !a.text.contains('*'));
+        // A click on the "c" cell lands on the "c" in the source line.
+        let c = a.text.find('c').unwrap();
+        assert_eq!(a.source_at(c), 10 + "| **ab** | ".len());
+    }
     #[test]
     fn links_and_formatting_are_found_at_the_cursor() {
         let line = "see [docs](https://a.b/c) and https://x.y now";

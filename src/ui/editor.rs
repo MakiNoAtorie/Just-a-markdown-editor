@@ -2,7 +2,7 @@ use crate::{
     core::{
         buffer::Document,
         config::Settings,
-        markdown::{self, BlockIndex, Presentation, Style},
+        markdown::{self, BlockIndex, Presentation, RowKind, Style},
     },
     render::{self, Rect, Renderer},
 };
@@ -21,6 +21,8 @@ pub struct Tile {
     source: String,
     raw: bool,
     code: bool,
+    /// Row kind and column widths this tile was asked to draw as a table.
+    table: Option<(RowKind, Vec<usize>)>,
     width: f32,
     size: f32,
     line_bytes: Vec<usize>,
@@ -46,12 +48,20 @@ impl Tile {
             .map(|(x, y)| (x, self.y + y))
     }
 }
+/// The table (or run of pipe lines that is not one) around the last line asked about.
+struct TableScan {
+    revision: u64,
+    rows: std::ops::Range<usize>,
+    /// Header line, delimiter line and column widths.
+    found: Option<(usize, usize, Vec<usize>)>,
+}
 #[derive(Default)]
 pub struct EditorView {
     pub top: usize,
     pub tiles: Vec<Tile>,
     pub rect: Option<Rect>,
     cache: VecDeque<Tile>,
+    table: Option<TableScan>,
     desired_x: Option<i32>,
     palette: render::theme::Palette,
     history: Vec<usize>,
@@ -74,7 +84,7 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
         palette.text
     });
     Attrs::new()
-        .family(Family::Name(if style.code {
+        .family(Family::Name(if style.code || style.mono {
             &settings.code_font
         } else {
             &settings.editor_font
@@ -91,7 +101,10 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
         })
         .color(color)
         .metadata(
-            usize::from(style.code) | usize::from(style.strike) << 1 | usize::from(style.link) << 2,
+            usize::from(style.code)
+                | usize::from(style.strike) << 1
+                | usize::from(style.link) << 2
+                | usize::from(style.border) << 3,
         )
         .metrics(Metrics::new(
             if style.heading > 0 {
@@ -102,7 +115,76 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
             size * 1.65,
         ))
 }
+fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
+    let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * 1.65));
+    buffer.set_size(Some(width), None);
+    buffer.set_wrap(wrap);
+    buffer.set_rich_text(
+        preview.spans.iter().map(|span| {
+            (
+                &preview.text[span.bytes.clone()],
+                attrs(span.style, settings.font_size, settings),
+            )
+        }),
+        &attrs(Style::default(), settings.font_size, settings),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(fonts, false);
+    buffer
+}
 impl EditorView {
+    /// How `line` should be drawn if it belongs to a pipe table: its role and the column widths.
+    fn table_row(
+        &mut self,
+        doc: &Document,
+        blocks: &BlockIndex,
+        line: usize,
+    ) -> Option<(RowKind, Vec<usize>)> {
+        let fresh = self
+            .table
+            .as_ref()
+            .is_some_and(|t| t.revision == doc.revision && t.rows.contains(&line));
+        if !fresh {
+            let pipes = |l: usize| {
+                let text = doc.text.line(l);
+                (text.len_chars() <= CHUNK && !blocks.in_code(l))
+                    .then(|| text.to_string())
+                    .filter(|s| s.contains('|'))
+            };
+            pipes(line)?;
+            // ponytail: tables longer than 300 rows either side of the line get widths from a window.
+            let mut first = line;
+            while first > 0 && line - first < 300 && pipes(first - 1).is_some() {
+                first -= 1;
+            }
+            let mut last = line;
+            while last + 1 < doc.text.len_lines() && last - line < 300 && pipes(last + 1).is_some() {
+                last += 1;
+            }
+            let lines: Vec<String> = (first..=last).map(|l| pipes(l).unwrap_or_default()).collect();
+            let found = lines
+                .iter()
+                .position(|l| markdown::is_delimiter(l))
+                .filter(|&d| d > 0)
+                .map(|d| {
+                    let rows = lines.iter().enumerate();
+                    let rows = rows.filter(|&(i, _)| i + 1 >= d && i != d).map(|(_, l)| l.as_str());
+                    (first + d - 1, first + d, markdown::column_widths(rows))
+                });
+            self.table = Some(TableScan { revision: doc.revision, rows: first..last + 1, found });
+        }
+        let scan = self.table.as_ref()?;
+        let (header, delimiter, widths) = scan.found.as_ref()?;
+        let kind = match line {
+            l if l < *header => return None,
+            l if l == *header => RowKind::Header,
+            l if l == *delimiter => RowKind::Delimiter,
+            l if l + 1 == scan.rows.end => RowKind::Last,
+            _ => RowKind::Body,
+        };
+        Some((kind, widths.clone()))
+    }
     pub fn clear_cache(&mut self) {
         self.tiles.clear();
         self.cache.clear();
@@ -149,39 +231,43 @@ impl EditorView {
                         .to_string()
                         .starts_with("```"));
             let width = rect.width as f32;
+            let row = if !raw && !code && start == line_start && end == line_end {
+                self.table_row(doc, blocks, line)
+            } else {
+                None
+            };
             let cached = self.cache.iter().position(|tile| {
                 tile.source == source
                     && tile.raw == raw
                     && tile.code == code
+                    && tile.table == row
                     && tile.width == width
                     && tile.size == settings.font_size
             });
             let mut tile = if let Some(index) = cached {
                 self.cache.remove(index).unwrap()
             } else {
-                let preview = markdown::present(
-                    &source,
-                    0,
-                    if raw { Some(0) } else { None },
-                    settings.show_markers,
-                    code,
-                );
-                let mut buffer =
-                    Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * 1.65));
-                buffer.set_size(Some(width), None);
-                buffer.set_wrap(Wrap::WordOrGlyph);
-                buffer.set_rich_text(
-                    preview.spans.iter().map(|span| {
-                        (
-                            &preview.text[span.bytes.clone()],
-                            attrs(span.style, settings.font_size, settings),
-                        )
-                    }),
-                    &attrs(Style::default(), settings.font_size, settings),
-                    Shaping::Advanced,
-                    None,
-                );
-                buffer.shape_until_scroll(fonts, false);
+                let flowing = |fonts: &mut FontSystem| {
+                    let preview = markdown::present(
+                        &source,
+                        0,
+                        if raw { Some(0) } else { None },
+                        settings.show_markers,
+                        code,
+                    );
+                    let buffer = shape(&preview, Wrap::WordOrGlyph, width, settings, fonts);
+                    (preview, buffer)
+                };
+                // A table wider than the pane would wrap into a mess, so it stays plain source.
+                let (preview, buffer) = match &row {
+                    Some((kind, widths)) => {
+                        let grid = markdown::present_table_row(&source, 0, *kind, widths);
+                        let buffer = shape(&grid, Wrap::None, width, settings, fonts);
+                        let widest = buffer.layout_runs().map(|run| run.line_w).fold(0., f32::max);
+                        if widest <= width { (grid, buffer) } else { flowing(fonts) }
+                    }
+                    None => flowing(fonts),
+                };
                 let height = buffer
                     .layout_runs()
                     .map(|run| run.line_top + run.line_height)
@@ -202,6 +288,7 @@ impl EditorView {
                     source,
                     raw,
                     code,
+                    table: row,
                     width,
                     size: settings.font_size,
                     line_bytes,
@@ -215,7 +302,13 @@ impl EditorView {
             } else {
                 tile.height
             };
-            y += height.max(settings.font_size * 1.65);
+            if tile.preview.row == Some(RowKind::Delimiter) {
+                // The header rule takes a sliver, not a blank line.
+                tile.height = 3.;
+                y += 3.;
+            } else {
+                y += height.max(settings.font_size * 1.65);
+            }
             self.tiles.push(tile);
             if end == doc.text.len_chars() {
                 break;
@@ -293,12 +386,32 @@ impl EditorView {
                     self.palette.muted,
                 );
             }
+            let delimiter = tile.preview.row == Some(RowKind::Delimiter);
+            let mut edges: Option<(f32, f32)> = None;
             for run in tile.buffer.layout_runs() {
                 let y = rect.y + (tile.y + run.line_top) as i32;
                 if y >= rect.y + rect.height as i32 {
                     break;
                 }
                 for glyph in run.glyphs {
+                    if glyph.metadata & 8 != 0 {
+                        let x = glyph.x + glyph.w / 2.;
+                        edges = Some(edges.map_or((x, x), |(a, b)| (a.min(x), b.max(x))));
+                        renderer.fill(
+                            Rect {
+                                x: rect.x + x as i32,
+                                y: rect.y + tile.y as i32,
+                                width: 1,
+                                height: tile.height.ceil() as u32,
+                            }
+                            .intersect(rect),
+                            self.palette.muted,
+                        );
+                        continue;
+                    }
+                    if delimiter {
+                        continue;
+                    }
                     let byte = tile.line_bytes[run.line_i] + glyph.start;
                     let source = tile.start + tile.preview.source_at(byte);
                     let color = if selection.contains(&source) {
@@ -349,6 +462,26 @@ impl EditorView {
                             self.palette.accent,
                         );
                     }
+                }
+            }
+            if let (Some(kind), Some((left, right))) = (tile.preview.row, edges) {
+                let bottom = tile.y + tile.height.ceil() - 1.;
+                let lines = match kind {
+                    RowKind::Header => [tile.y, tile.y],
+                    RowKind::Delimiter => [tile.y, bottom],
+                    _ => [bottom, bottom],
+                };
+                for y in lines {
+                    renderer.fill(
+                        Rect {
+                            x: rect.x + left as i32,
+                            y: rect.y + y as i32,
+                            width: (right - left) as u32 + 1,
+                            height: 1,
+                        }
+                        .intersect(rect),
+                        self.palette.muted,
+                    );
                 }
             }
             renderer.text(
