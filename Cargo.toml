@@ -1,0 +1,37 @@
+[package]
+name = "just-a-markdown-editor"
+version = "0.1.0"
+edition = "2024"
+description = "A small native Markdown editor"
+license = "MIT"
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+cosmic-text = "0.19"
+ropey = "1.6"
+pulldown-cmark = "0.13"
+arboard = { version = "3.6", default-features = false }
+notify = "8.2"
+tempfile = "3.27"
+im = "15.1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+trash = "5.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Controls_Dialogs", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[[bin]]
+name = "just-a-markdown-editor"
+path = "src/main.rs"
+
+[[bin]]
+name = "performance-check"
+path = "src/bin/performance-check.rs"

@@ -1,0 +1,7 @@
+/target/
+/.tools/
+/dist/
+/performance-results.json
+/native-preview.bmp
+/startup-results.txt
+/startup-errors.txt
