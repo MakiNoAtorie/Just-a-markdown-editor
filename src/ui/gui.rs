@@ -239,6 +239,7 @@ impl App {
             Command::Reopen => !self.closed.is_empty(),
             Command::RenameFile | Command::DeleteFile => self.target_path().is_some(),
             Command::Cut | Command::Copy => tab.is_some_and(|t| !t.document.selection().is_empty()),
+            Command::GotoLine | Command::WordCount | Command::ExportHtml => tab.is_some(),
             _ => true,
         }
     }

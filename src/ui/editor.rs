@@ -639,3 +639,68 @@ impl EditorView {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ropey::Rope;
+    thread_local! {
+        static FONTS: std::cell::RefCell<FontSystem> = std::cell::RefCell::new(FontSystem::new());
+    }
+    fn kinds(text: &str, cursor: usize, width: u32, markers: bool) -> Vec<Option<RowKind>> {
+        let mut doc = Document::new(Rope::from_str(text));
+        doc.select(cursor.min(doc.text.len_chars()), false);
+        let mut blocks = BlockIndex::default();
+        blocks.update(&doc.text, 0);
+        let mut settings = Settings::default();
+        settings.show_markers = markers;
+        let mut view = EditorView::default();
+        let rect = Rect { x: 0, y: 0, width, height: 4000 };
+        FONTS.with(|fonts| view.layout(&doc, &blocks, &settings, &mut fonts.borrow_mut(), rect));
+        // Painting and hit-testing every tile must not panic either.
+        view.hit(10., 10.);
+        view.tiles.iter().map(|t| t.preview.row).collect()
+    }
+    #[test]
+    fn tables_get_header_rule_body_and_last_rows() {
+        use RowKind::*;
+        let table = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nafter\n";
+        let cursor = table.len() - 2;
+        let expect = vec![None, None, Some(Header), Some(Delimiter), Some(Body), Some(Last), None, None];
+        assert_eq!(&kinds(table, cursor, 800, false)[..8], &expect[..]);
+        // The same table in a CRLF file, and with no newline at the very end.
+        let crlf = table.replace('\n', "\r\n");
+        assert_eq!(&kinds(&crlf, crlf.len() - 2, 800, false)[..8], &expect[..]);
+        let bare = "| a | b |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(kinds(bare, bare.len(), 800, false), [Some(Header), Some(Delimiter), None]);
+        assert_eq!(kinds(bare, 0, 800, false), [None, Some(Delimiter), Some(Last)]);
+    }
+    #[test]
+    fn tables_fall_back_to_source_when_they_cannot_be_drawn() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |\n\nx";
+        let source = table.len() - 1;
+        // Too narrow, markers shown, or inside a code fence: plain source, never a grid.
+        assert!(kinds(table, source, 40, false).iter().all(Option::is_none));
+        assert!(kinds(table, source, 800, true).iter().all(Option::is_none));
+        let fenced = "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\nx";
+        assert!(kinds(fenced, fenced.len(), 800, false).iter().all(Option::is_none));
+        // A header with no delimiter row, or a delimiter with no header, is not a table.
+        assert!(kinds("a | b\nc | d\nx", 12, 800, false).iter().all(Option::is_none));
+        assert!(kinds("|---|---|\n| 1 | 2 |\nx", 19, 800, false).iter().all(Option::is_none));
+    }
+    #[test]
+    fn long_tables_and_every_cursor_position_lay_out() {
+        let mut big = String::from("| name | n |\n|---|---|\n");
+        for i in 0..700 {
+            big.push_str(&format!("| row {i} | {i} |\n"));
+        }
+        for cursor in [0, 30, big.len() / 2, big.len() - 1] {
+            let k = kinds(&big, cursor, 800, false);
+            assert!(k.len() > 10);
+        }
+        let small = "| é | 漢 |\r\n|:-:|--:|\r\n| `x` | **y** |\r\n\r\n|\r\n||\r\n|||\r\n";
+        for cursor in 0..=small.chars().count() {
+            kinds(small, cursor, 300, false);
+        }
+    }
+}

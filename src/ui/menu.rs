@@ -17,6 +17,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::Save),
             Some(Command::SaveAs),
             Some(Command::Reload),
+            None,
             Some(Command::ExportHtml),
             None,
             Some(Command::CreateFile),

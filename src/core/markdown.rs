@@ -194,6 +194,17 @@ pub fn present(
     show_markers: bool,
     initial_code: bool,
 ) -> Presentation {
+    present_with(source, start, cursor_line, show_markers, initial_code, true)
+}
+/// `plain_pipes` keeps any line containing `|` as monospace source; table cells turn it off.
+fn present_with(
+    source: &str,
+    start: usize,
+    cursor_line: Option<usize>,
+    show_markers: bool,
+    initial_code: bool,
+    plain_pipes: bool,
+) -> Presentation {
     let mut output = Presentation {
         start,
         end: start + source.chars().count(),
@@ -309,8 +320,8 @@ pub fn present(
                 }
             };
             keep[..list_prefix.min(line.len())].fill(true);
-            // Tables deliberately remain tidy source in v1.
-            if line.contains('|') {
+            // Pipe lines that are not drawn as a table stay tidy monospace source.
+            if plain_pipes && line.contains('|') {
                 keep.fill(true);
                 styles.fill(Style {
                     code: true,
@@ -440,7 +451,7 @@ pub fn column_widths<'a>(rows: impl Iterator<Item = &'a str>) -> Vec<usize> {
     for line in rows {
         let Some(row) = split_row(line) else { continue };
         for (k, cell) in row.cells.iter().enumerate() {
-            let width = present(&line[cell.clone()], 0, None, false, false).text.chars().count();
+            let width = present_with(&line[cell.clone()], 0, None, false, false, false).text.chars().count();
             if k == widths.len() {
                 widths.push(width);
             } else {
@@ -490,7 +501,7 @@ pub fn present_table_row(line: &str, start: usize, kind: RowKind, widths: &[usiz
         push(&mut out, " ", plain, None);
         let mut used = 0;
         if kind != RowKind::Delimiter && !cell.is_empty() {
-            let shown = present(&line[cell.clone()], at(cell.start), None, false, false);
+            let shown = present_with(&line[cell.clone()], at(cell.start), None, false, false, false);
             let base = out.text.len();
             out.source.extend(shown.source[..shown.source.len() - 1].iter().map(|&(b, c)| (b + base, c)));
             for span in &shown.spans {
@@ -602,6 +613,30 @@ pub fn format_at(line: &str, col: usize) -> Format {
 mod tests {
     use super::*;
     #[test]
+    fn table_rows_survive_hostile_lines() {
+        let alphabet = ["|", "|", "-", ":", " ", "a", "é", "漢", "\\", "`", "*", "[", "](", "\t", "😀"];
+        let mut seed = 12345u64;
+        for _ in 0..20000 {
+            let mut line = String::new();
+            for _ in 0..(seed % 14) {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                line.push_str(alphabet[(seed >> 33) as usize % alphabet.len()]);
+            }
+            line.push_str(["", "\n", "\r\n"][(seed >> 20) as usize % 3]);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let _ = is_delimiter(&line);
+            let _ = column_widths([line.as_str()].into_iter());
+            for kind in [RowKind::Header, RowKind::Delimiter, RowKind::Body, RowKind::Last] {
+                let p = present_table_row(&line, 7, kind, &[3, 5, 3]);
+                let covered: String = p.spans.iter().map(|s| &p.text[s.bytes.clone()]).collect();
+                assert_eq!(covered, p.text, "spans must cover the text of {line:?}");
+                assert!(p.source.windows(2).all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1), "{line:?} {:?}", p.source);
+                assert_eq!(p.source.last(), Some(&(p.text.len(), p.end)), "{line:?}");
+                assert!(p.source.iter().all(|&(b, c)| b <= p.text.len() && (p.start..=p.end).contains(&c)), "{line:?}");
+            }
+        }
+    }
+    #[test]
     fn table_rows_share_column_widths_and_map_back_to_source() {
         assert!(is_delimiter("|:--|---:|") && !is_delimiter("a|b") && !is_delimiter("| a | b |"));
         let widths = column_widths(["| a | bbb |", "|**cc**|d|"].into_iter());
@@ -611,6 +646,8 @@ mod tests {
         let b = present_table_row("x|yy\n", 0, RowKind::Body, &widths);
         assert_eq!(a.text.chars().count(), b.text.chars().count() + 1);
         assert!(a.text.contains("ab") && !a.text.contains('*'));
+        let escaped = present_table_row("| a \\| b | c |\n", 0, RowKind::Body, &widths);
+        assert!(escaped.text.contains("a | b") && escaped.spans.iter().all(|s| !s.style.code));
         // A click on the "c" cell lands on the "c" in the source line.
         let c = a.text.find('c').unwrap();
         assert_eq!(a.source_at(c), 10 + "| **ab** | ".len());

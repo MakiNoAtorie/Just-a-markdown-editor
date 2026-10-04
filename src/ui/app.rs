@@ -1921,11 +1921,15 @@ impl App {
                     );
                 }
             }
-            Command::ExportHtml => {
+            Command::ExportHtml => 'export: {
                 if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
+                    if tab.loading || tab.failed {
+                        self.status = "Wait for the whole file to load, then export it.".into();
+                        break 'export;
+                    }
                     let (Some(storage), Some(path)) = (&tab.storage, &tab.path) else {
                         self.status = "Save the file first, then export it.".into();
-                        return;
+                        break 'export;
                     };
                     let (storage, text, proxy) =
                         (storage.clone(), tab.document.text.clone(), self.proxy.clone());
@@ -3975,6 +3979,25 @@ mod tests {
                         self.app.tabs[&self.first].path.as_deref(),
                         Some(Path::new("first.md"))
                     );
+                    // Go to line clamps, word count reports, export writes next to the file.
+                    self.app.goto_line("2");
+                    let doc = &self.app.tabs[&self.first].document;
+                    assert_eq!(doc.cursor, doc.text.line_to_char(1));
+                    self.app.goto_line("99999");
+                    let doc = &self.app.tabs[&self.first].document;
+                    assert_eq!(doc.cursor, doc.text.line_to_char(doc.text.len_lines() - 1));
+                    self.app.goto_line("abc");
+                    self.app.command(Command::WordCount);
+                    assert!(self.app.status.starts_with("3 words"), "{}", self.app.status);
+                    self.app.command(Command::ExportHtml);
+                    self.phase = 13;
+                }
+                13 if self.app.status.starts_with("Exported") => {
+                    let html =
+                        std::fs::read_to_string(self.outside.path().join("first.html")).unwrap();
+                    assert!(html.contains("<p>mine outside document</p>"), "{html}");
+                    // Later phases expect the cursor where the earlier phases left it.
+                    self.app.tabs.get_mut(&self.first).unwrap().document.select(5, false);
                     self.app.persist_session(false);
                     self.phase = 7;
                 }
