@@ -3414,6 +3414,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.set_workspace(root);
                             }
                             if let Some(split) = session.split {
+                                for &id in self.tabs.keys() {
+                                    self.forget_scan(id);
+                                }
                                 self.tabs.clear();
                                 self.split = self.restore_split(split);
                                 self.active_pane = self.split.first_pane();
