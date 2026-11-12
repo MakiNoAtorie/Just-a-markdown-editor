@@ -71,6 +71,8 @@ pub struct EditorView {
     scrolled: (usize, u64),
     /// Sorted char ranges to tint, e.g. every match of the find bar.
     pub highlights: Vec<(usize, usize)>,
+    /// Scroll the caret into view on the next layout, when the tiles match the text.
+    reveal: bool,
 }
 fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
     let palette = render::theme::Palette::new(settings.light(), settings.accent_color());
@@ -220,7 +222,11 @@ impl EditorView {
         rect: Rect,
     ) {
         self.fill(doc, blocks, settings, fonts, rect);
+        let reveal = std::mem::take(&mut self.reveal);
         if !settings.typewriter {
+            if reveal {
+                self.reveal_caret(doc, blocks, settings, fonts, rect);
+            }
             return;
         }
         let middle = rect.height as f32 * 0.5;
@@ -363,8 +369,10 @@ impl EditorView {
             } else {
                 y += tile.height.max(settings.font_size * 1.65);
             }
+            // A final newline opens an empty last line; it needs its own tile to hold the caret.
+            let last_line_open = start < end && doc.text.char(end - 1) == '\n';
             self.tiles.push(tile);
-            if end == doc.text.len_chars() {
+            if end == doc.text.len_chars() && !last_line_open {
                 break;
             }
             start = end;
@@ -617,7 +625,7 @@ impl EditorView {
             if attempt < 2 {
                 if position.is_none() {
                     // The caret is off screen: show it first, then move from it.
-                    self.ensure_cursor(doc);
+                    self.ensure_cursor();
                 } else {
                     self.scroll(doc, if down { 4 } else { -4 });
                 }
@@ -670,20 +678,60 @@ impl EditorView {
         }
         self.scrolled = (self.top, doc.revision);
     }
-    pub fn ensure_cursor(&mut self, doc: &Document) {
-        let visible_end = self
-            .tiles
-            .last()
-            .map_or(self.top, |tile| tile.start + tile.preview.end);
-        let height = self.rect.map_or(600, |r| r.height) as f32;
-        let cursor_visible = self.caret(doc.cursor).is_some_and(|(_, y)| y < height - 30.0);
-        if doc.cursor < self.top || doc.cursor > visible_end || !cursor_visible {
-            let line_start = doc.text.line_to_char(doc.text.char_to_line(doc.cursor));
+    /// Asks the next layout to scroll the caret into view; the current tiles may predate the edit.
+    pub fn ensure_cursor(&mut self) {
+        self.reveal = true;
+    }
+    /// Scrolls as little as possible to show the caret row, so the text does not jump.
+    fn reveal_caret(
+        &mut self,
+        doc: &Document,
+        blocks: &BlockIndex,
+        settings: &Settings,
+        fonts: &mut FontSystem,
+        rect: Rect,
+    ) {
+        let row = settings.font_size * 1.65;
+        let height = rect.height as f32;
+        let screen = (height / row).max(1.) as usize;
+        let line = doc.text.char_to_line(doc.cursor);
+        let last_line = |view: &Self| view.tiles.last().map_or(line, |t| doc.text.char_to_line(t.start));
+        let above = doc.cursor < self.top;
+        let far_below = self.caret(doc.cursor).is_none() && line > last_line(self) + screen;
+        if above || far_below {
+            let top_line = doc.text.char_to_line(self.top);
+            // A move of one screen or less keeps the caret row at the top edge; a longer jump
+            // leaves a third of the screen above the caret for context.
+            let context = if above && top_line - line <= screen { 0 } else { screen / 3 };
+            let line_start = doc.text.line_to_char(line);
             self.top = if doc.cursor - line_start > CHUNK {
                 doc.cursor.saturating_sub(160)
             } else {
-                line_start
+                doc.text.line_to_char(line.saturating_sub(context))
             };
+            self.fill(doc, blocks, settings, fonts, rect);
+        }
+        // The caret is below the view: scroll down only by the rows it is hidden.
+        for _ in 0..8 {
+            let bottom = match self.caret(doc.cursor) {
+                Some((_, y)) => y + row,
+                None => match self.tiles.last() {
+                    Some(last) => {
+                        let gap = line.saturating_sub(last_line(self)) as f32;
+                        last.y + last.height.max(row) + gap * row
+                    }
+                    None => return,
+                },
+            };
+            if bottom <= height {
+                return;
+            }
+            let before = self.top;
+            self.scroll(doc, ((bottom - height) / row).ceil().max(1.) as i32);
+            if self.top == before {
+                return;
+            }
+            self.fill(doc, blocks, settings, fonts, rect);
         }
     }
 }
@@ -750,6 +798,39 @@ mod tests {
         for cursor in 0..=small.chars().count() {
             kinds(small, cursor, 300, false);
         }
+    }
+    #[test]
+    fn enter_scrolls_only_when_the_caret_leaves_the_view() {
+        let settings = Settings::default();
+        let row = settings.font_size * 1.65;
+        let rect = Rect { x: 0, y: 0, width: 800, height: (row * 10.) as u32 };
+        let mut blocks = BlockIndex::default();
+        let mut view = EditorView::default();
+        let mut enter = |doc: &mut Document, view: &mut EditorView, fonts: &mut FontSystem| {
+            view.layout(doc, &blocks, &settings, fonts, rect);
+            doc.enter();
+            blocks.update(&doc.text, 0);
+            view.ensure_cursor();
+            view.layout(doc, &blocks, &settings, fonts, rect);
+        };
+        FONTS.with(|fonts| {
+            let fonts = &mut fonts.borrow_mut();
+            // Enter in an empty file keeps the first line in view.
+            let mut doc = Document::default();
+            enter(&mut doc, &mut view, fonts);
+            assert_eq!(view.top, 0);
+            // Enter on the last visible line scrolls by about one row, not a screen.
+            let text: String = (0..9).map(|i| format!("line {i}\n")).collect::<String>() + "last";
+            let mut doc = Document::new(Rope::from_str(&text));
+            doc.select(doc.text.len_chars(), false);
+            for _ in 0..3 {
+                enter(&mut doc, &mut view, fonts);
+            }
+            let first = doc.text.char_to_line(view.top);
+            assert!((2..=4).contains(&first), "first visible line is {first}");
+            let (_, y) = view.caret(doc.cursor).unwrap();
+            assert!(y + row <= rect.height as f32);
+        });
     }
     #[test]
     fn up_and_down_visit_the_table_rule_line() {

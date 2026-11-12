@@ -410,7 +410,7 @@ impl App {
         self.dirty_session();
         if let Some(tab) = self.tabs.get_mut(&id) {
             tab.edited = Some(Instant::now());
-            tab.view.ensure_cursor(&tab.document);
+            tab.view.ensure_cursor();
         }
         self.scan(id, false);
         self.status.clear();
@@ -618,7 +618,7 @@ impl App {
             }
             if let Some(tab) = self.tabs.get_mut(&id) {
                 tab.document.select(position, false);
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             self.title();
             self.redraw();
@@ -1165,7 +1165,7 @@ impl App {
                     if let Some(tab) = self.tabs.get_mut(&id) {
                         tab.document.anchor = found.start.min(tab.document.text.len_chars());
                         tab.document.cursor = found.end.min(tab.document.text.len_chars());
-                        tab.view.ensure_cursor(&tab.document);
+                        tab.view.ensure_cursor();
                     }
                     if kind != Some(Kind::Replace) {
                         self.overlay = None;
@@ -1266,7 +1266,7 @@ impl App {
             let len = tab.document.text.len_chars();
             tab.document.anchor = found.start.min(len);
             tab.document.cursor = found.end.min(len);
-            tab.view.ensure_cursor(&tab.document);
+            tab.view.ensure_cursor();
         }
     }
     fn change(&mut self, edit: impl FnOnce(&mut Settings)) {
@@ -2185,11 +2185,11 @@ impl App {
         match key {
             Key::Named(NamedKey::ArrowLeft) => {
                 tab.document.horizontal(false, shift, primary);
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             Key::Named(NamedKey::ArrowRight) => {
                 tab.document.horizontal(true, shift, primary);
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
                 let motion = if matches!(key, Key::Named(NamedKey::ArrowDown)) {
@@ -2207,7 +2207,7 @@ impl App {
                     motion,
                     shift,
                 );
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             Key::Named(NamedKey::Home) => {
                 let start = if primary {
@@ -2218,7 +2218,7 @@ impl App {
                         .line_to_char(tab.document.text.char_to_line(tab.document.cursor))
                 };
                 tab.document.select(start, shift);
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             Key::Named(NamedKey::End) => {
                 let line = tab.document.text.char_to_line(tab.document.cursor);
@@ -2234,7 +2234,7 @@ impl App {
                     }
                 }
                 tab.document.select(end, shift);
-                tab.view.ensure_cursor(&tab.document);
+                tab.view.ensure_cursor();
             }
             Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
                 tab.view.scroll(
@@ -3258,7 +3258,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     tab.restore_cursor = None;
                                     // A restored session sets top; a fresh open scrolls to the cursor.
                                     if tab.view.top == 0 {
-                                        tab.view.ensure_cursor(&tab.document);
+                                        tab.view.ensure_cursor();
                                     }
                                 }
                             }
@@ -3268,7 +3268,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(cursor) = tab.restore_cursor.take() {
                                 tab.document.select(cursor, false);
                                 if tab.view.top == 0 {
-                                    tab.view.ensure_cursor(&tab.document);
+                                    tab.view.ensure_cursor();
                                 }
                             }
                             self.scan(id, true);

@@ -32,7 +32,7 @@ Install stable Rust and Visual Studio C++ Build Tools, then run:
 
 This workspace has a project-local Rust toolchain under `.tools`; the build script detects it. Rust is not needed to run the executable.
 
-The 32 tests cover Unicode and line endings, undo and saved-state tracking, list continuation, parsing and incremental indexes, byte order marks, editor layout of CRLF and separator characters, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
+The 33 tests cover Unicode and line endings, undo and saved-state tracking, list continuation, parsing and incremental indexes, byte order marks, editor layout of CRLF and separator characters, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
 
 The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 1100x760 and 2560x1440. Each case includes a full block index and measures 220 warmed edit and scroll samples through viewport parsing, shaping, CPU rasterization and framebuffer copy. `performance-results.json` records results and fails the gate above 5 ms per edit or a 60 Hz scroll budget. OS presentation, background scanning, display latency and truly cold disk caches are outside that benchmark.
 
