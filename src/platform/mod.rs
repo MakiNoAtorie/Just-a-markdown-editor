@@ -73,7 +73,7 @@ pub fn save_destination(path: &Path) -> Option<PathBuf> {
     Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
 }
 
-/// Modern Explorer-style folder picker (IFileOpenDialog); falls back to the legacy tree dialog.
+/// Modern Explorer-style folder picker (IFileOpenDialog).
 #[cfg(windows)]
 pub fn choose_folder(owner: usize) -> Option<PathBuf> {
     use std::{ffi::OsString, ffi::c_void, os::windows::ffi::OsStringExt};
@@ -109,9 +109,7 @@ pub fn choose_folder(owner: usize) -> Option<PathBuf> {
         let mut dialog: This = std::ptr::null_mut();
         let created = CoCreateInstance(&clsid, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, &iid, &mut dialog);
         let mut result = None;
-        let mut used = false;
         if created >= 0 && !dialog.is_null() {
-            used = true;
             let release: unsafe extern "system" fn(This) -> u32 = slot(dialog, RELEASE);
             let get_options: unsafe extern "system" fn(This, *mut u32) -> i32 = slot(dialog, GET_OPTIONS);
             let set_options: unsafe extern "system" fn(This, u32) -> i32 = slot(dialog, SET_OPTIONS);
@@ -146,39 +144,6 @@ pub fn choose_folder(owner: usize) -> Option<PathBuf> {
         if initialized {
             CoUninitialize();
         }
-        if used { result } else { choose_folder_legacy(owner) }
-    }
-}
-#[cfg(windows)]
-fn choose_folder_legacy(owner: usize) -> Option<PathBuf> {
-    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-    use windows_sys::Win32::{
-        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
-        UI::Shell::*,
-    };
-    unsafe {
-        let initialized = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) >= 0;
-        let mut path = [0u16; 32768];
-        let title: Vec<u16> = "Choose your Markdown workspace\0".encode_utf16().collect();
-        let mut dialog: BROWSEINFOW = std::mem::zeroed();
-        dialog.hwndOwner = owner as _;
-        dialog.lpszTitle = title.as_ptr();
-        dialog.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-        let item = SHBrowseForFolderW(&dialog);
-        let result = if !item.is_null()
-            && SHGetPathFromIDListEx(item, path.as_mut_ptr(), path.len() as u32, 0) != 0
-        {
-            let end = path.iter().position(|c| *c == 0).unwrap_or(path.len());
-            Some(PathBuf::from(OsString::from_wide(&path[..end])))
-        } else {
-            None
-        };
-        if !item.is_null() {
-            CoTaskMemFree(item.cast());
-        }
-        if initialized {
-            CoUninitialize();
-        }
         result
     }
 }
@@ -199,6 +164,38 @@ pub fn choose_folder(_: usize) -> Option<PathBuf> {
     None
 }
 
+/// Moves a file or folder to the Recycle Bin without UI.
+#[cfg(windows)]
+pub fn recycle(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::*;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let prefix = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    // SHFileOperationW does not accept verbatim (\\?\) paths.
+    let mut from = if wide.starts_with(&prefix(r"\\?\UNC\")) {
+        [prefix(r"\\"), wide[8..].to_vec()].concat()
+    } else if wide.starts_with(&prefix(r"\\?\")) {
+        wide[4..].to_vec()
+    } else {
+        wide
+    };
+    // pFrom is a list that ends with two NULs.
+    from.extend([0, 0]);
+    let mut operation: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    operation.wFunc = FO_DELETE;
+    operation.pFrom = from.as_ptr();
+    operation.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16;
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 || operation.fAnyOperationsAborted != 0 {
+        return Err(std::io::Error::other(format!("Could not move to the Recycle Bin (code {code})")));
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn recycle(_: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "No Recycle Bin on this platform"))
+}
+
 pub fn data_directory() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -206,12 +203,8 @@ pub fn data_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+#[derive(Default)]
 pub struct Clipboard(Option<arboard::Clipboard>);
-impl Default for Clipboard {
-    fn default() -> Self {
-        Self(None)
-    }
-}
 impl Clipboard {
     fn get(&mut self) -> Result<&mut arboard::Clipboard, String> {
         if self.0.is_none() {

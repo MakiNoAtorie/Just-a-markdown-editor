@@ -2,10 +2,14 @@ use super::workspace::valid_relative;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ropey::{Rope, RopeBuilder};
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub enum ReadEvent {
@@ -115,31 +119,36 @@ impl Storage for LocalStorage {
         if target.is_symlink() {
             target = target.canonicalize()?;
         }
-        let mut temporary = tempfile::NamedTempFile::new_in(
-            target
-                .parent()
-                .ok_or_else(|| io::Error::other("Missing parent"))?,
-        )?;
-        text.write_to(temporary.as_file_mut())?;
-        temporary.flush()?;
-        temporary.as_file().sync_all()?;
-        if target.exists() {
-            fs::set_permissions(temporary.path(), fs::metadata(&target)?.permissions())?;
-        }
-        // A short-lived reader or antivirus handle can delay replacement on Windows.
-        for attempt in 0..5 {
-            match temporary.persist(&target) {
-                Ok(_) => return Ok(()),
-                Err(error)
-                    if attempt < 4 && error.error.kind() == io::ErrorKind::PermissionDenied =>
-                {
-                    temporary = error.file;
-                    std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
-                }
-                Err(error) => return Err(error.error),
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut name = OsString::from(".");
+        name.push(target.file_name().ok_or_else(|| io::Error::other("Missing file name"))?);
+        name.push(format!(".{}-{}.tmp", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let temporary = target.with_file_name(name);
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        let result = (|| {
+            text.write_to(&mut file)?;
+            file.sync_all()?;
+            // The handle must be closed before the rename on Windows.
+            drop(file);
+            if target.exists() {
+                fs::set_permissions(&temporary, fs::metadata(&target)?.permissions())?;
             }
+            // A short-lived reader or antivirus handle can delay replacement on Windows.
+            let mut attempt = 0;
+            loop {
+                match fs::rename(&temporary, &target) {
+                    Err(error) if attempt < 4 && error.kind() == io::ErrorKind::PermissionDenied => {
+                        std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
+                        attempt += 1;
+                    }
+                    result => return result,
+                }
+            }
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
         }
-        unreachable!()
+        result
     }
     fn list(&self, path: &Path) -> io::Result<Vec<Entry>> {
         let directory = if valid_relative(path)
@@ -204,7 +213,7 @@ impl Storage for LocalStorage {
         fs::rename(source, target)
     }
     fn trash(&self, path: &Path) -> io::Result<()> {
-        trash::delete(self.resolve(path)?).map_err(io::Error::other)
+        crate::platform::recycle(&self.resolve(path)?)
     }
     fn create(&self, path: &Path, folder: bool) -> io::Result<()> {
         let target = self.resolve(path)?;
@@ -329,7 +338,11 @@ mod tests {
             .unwrap();
         assert!(kept.is_none());
         assert_eq!(fs::read_to_string(root.join("gone.md")).unwrap(), "mine");
+        #[cfg(windows)]
+        store.trash(Path::new("gone.md")).unwrap();
+        #[cfg(not(windows))]
         fs::remove_file(root.join("gone.md")).unwrap();
+        assert!(!root.join("gone.md").exists());
         fs::remove_dir(root).unwrap();
     }
 }

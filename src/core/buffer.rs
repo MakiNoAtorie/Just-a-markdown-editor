@@ -1,5 +1,5 @@
 use ropey::Rope;
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 #[derive(Clone, Debug)]
 pub struct Edit {
@@ -22,10 +22,9 @@ pub struct Document {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     saved: Rope,
-    saved_revision: u64,
     state: u64,
     saved_state: u64,
-    states: im::OrdMap<u64, u64>,
+    states: BTreeMap<u64, u64>,
 }
 
 impl Default for Document {
@@ -51,7 +50,6 @@ impl Document {
             changed: 0..1,
             undo: Vec::new(),
             redo: Vec::new(),
-            saved_revision: 0,
             state: 0,
             saved_state: 0,
             states: [(0u64, 0u64)].into_iter().collect(),
@@ -64,7 +62,6 @@ impl Document {
         self.state != self.saved_state
     }
     pub fn mark_saved(&mut self, revision: u64, snapshot: Rope) {
-        self.saved_revision = revision;
         self.saved_state = self.states.get(&revision).copied().unwrap_or(revision);
         self.saved = snapshot;
     }

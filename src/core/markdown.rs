@@ -211,7 +211,6 @@ fn present_with(
         end: start + source.chars().count(),
         ..Default::default()
     };
-    let mut byte_offset = 0;
     let mut char_offset = start;
     let mut code = initial_code;
     for (line_i, line) in source.split_inclusive('\n').enumerate() {
@@ -341,7 +340,6 @@ fn present_with(
             code = !code;
         }
         for (index, character) in line.char_indices() {
-            let end = index + character.len_utf8();
             let task = if raw {
                 None
             } else {
@@ -384,10 +382,8 @@ fn present_with(
                 }
             }
             char_offset += 1;
-            byte_offset += end - index;
         }
     }
-    let _ = byte_offset;
     output.source.push((output.text.len(), output.end));
     output
 }
