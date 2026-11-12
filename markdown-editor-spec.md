@@ -49,7 +49,7 @@ The coding agent works with Ponytail. The module boundaries in section 13 and th
 Headings, bold, italic, strikethrough, bullet and numbered lists, task checkboxes (clickable), links, block quotes, inline code, fenced code blocks, horizontal rules.
 
 - Code blocks: monospace font on a tinted background. No per-language coloring.
-- Tables: shown as tidy monospace source, not rendered.
+- Tables: pipe tables are drawn as an aligned monospace grid; the cursor's row shows its source.
 
 ### Editing behavior
 
@@ -188,7 +188,7 @@ Sync is not built in v1, but the design must allow adding it without rework:
 
 ## 15. Not in v1
 
-Leave room for these, but do not build them: rendered tables, inline images, math, wiki-links, export, spellcheck, per-language code coloring, right-to-left text, screen reader support, dragging files between folders in the tree, multiple workspace folders per window.
+Leave room for these, but do not build them: inline images, math, wiki-links, export other than plain HTML, spellcheck, per-language code coloring, right-to-left text, screen reader support, dragging files between folders in the tree, multiple workspace folders per window.
 
 ## 16. Build order
 

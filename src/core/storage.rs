@@ -30,7 +30,14 @@ pub trait Storage: Send + Sync {
     fn trash(&self, path: &Path) -> io::Result<()>;
     fn create(&self, path: &Path, folder: bool) -> io::Result<()>;
     fn write_checked(&self, path: &Path, text: &Rope, expected: &Rope) -> io::Result<Option<Rope>> {
-        let disk = read_complete(self, path)?;
+        let disk = match read_complete(self, path) {
+            Ok(disk) => disk,
+            // The file was deleted outside the app: write it again so the edits are kept.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return self.write(path, text).map(|_| None);
+            }
+            Err(error) => return Err(error),
+        };
         if disk != *expected {
             return Ok(Some(disk));
         }
@@ -103,7 +110,11 @@ impl Storage for LocalStorage {
         });
     }
     fn write(&self, path: &Path, text: &Rope) -> io::Result<()> {
-        let target = self.resolve(path)?;
+        let mut target = self.resolve(path)?;
+        // Write through a symlink to its file instead of replacing the link.
+        if target.is_symlink() {
+            target = target.canonicalize()?;
+        }
         let mut temporary = tempfile::NamedTempFile::new_in(
             target
                 .parent()
@@ -151,7 +162,9 @@ impl Storage for LocalStorage {
                     .collect();
                 Ok(Entry {
                     path,
-                    directory: entry.file_type()?.is_dir(),
+                    // fs::metadata follows junctions and directory symlinks.
+                    directory: entry.file_type()?.is_dir()
+                        || fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()),
                 })
             })
             .collect()
@@ -179,13 +192,16 @@ impl Storage for LocalStorage {
     }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let target = self.resolve(to)?;
-        if target.exists() {
+        let source = self.resolve(from)?;
+        // A case-only rename finds the same file on Windows.
+        let same = source.canonicalize().ok() == target.canonicalize().ok();
+        if target.exists() && !same {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "A file with that name already exists",
             ));
         }
-        fs::rename(self.resolve(from)?, target)
+        fs::rename(source, target)
     }
     fn trash(&self, path: &Path) -> io::Result<()> {
         trash::delete(self.resolve(path)?).map_err(io::Error::other)
@@ -306,7 +322,14 @@ mod tests {
                 .write(Path::new("../escape.md"), &Rope::new())
                 .is_err()
         );
-        fs::remove_file(root.join("test.md")).unwrap();
+        store.rename(Path::new("test.md"), Path::new("Test.md")).unwrap();
+        fs::remove_file(root.join("Test.md")).unwrap();
+        let kept = store
+            .write_checked(Path::new("gone.md"), &Rope::from_str("mine"), &Rope::from_str("old"))
+            .unwrap();
+        assert!(kept.is_none());
+        assert_eq!(fs::read_to_string(root.join("gone.md")).unwrap(), "mine");
+        fs::remove_file(root.join("gone.md")).unwrap();
         fs::remove_dir(root).unwrap();
     }
 }

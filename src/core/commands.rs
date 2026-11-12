@@ -241,8 +241,15 @@ pub fn parse_shortcut(value: &str) -> Result<Option<Shortcut>, String> {
         alt: false,
         key: String::new(),
     };
-    for part in value.split('+') {
+    // "Ctrl++" names the plus key: split the modifiers off before the final key.
+    let (modifiers, last) = match value.strip_suffix("++") {
+        Some(rest) => (rest, "+"),
+        None => value.rsplit_once('+').unwrap_or(("", value)),
+    };
+    let parts = modifiers.split('+').filter(|_| !modifiers.is_empty());
+    for part in parts.chain([last]) {
         match part.trim().to_lowercase().as_str() {
+            "+" => shortcut.key = "+".into(),
             "ctrl" | "cmd" => shortcut.primary = true,
             "shift" => shortcut.shift = true,
             "alt" | "option" => shortcut.alt = true,
@@ -315,6 +322,9 @@ mod tests {
         assert_eq!(resolve("b", true, false, true, &keys), Some(Command::Bold));
         let captured = parse_shortcut(&format_shortcut(true, true, false, "f2")).unwrap();
         assert_eq!(captured.unwrap().key, "f2");
+        let plus = parse_shortcut(&format_shortcut(true, true, false, "+")).unwrap();
+        assert_eq!(plus.unwrap().key, "+");
+        assert!(parse_shortcut("Ctrl+").is_err());
         keys.insert("bold".into(), "".into());
         assert_eq!(resolve("b", true, false, false, &keys), None);
     }

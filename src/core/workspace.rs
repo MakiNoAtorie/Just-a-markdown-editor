@@ -81,6 +81,8 @@ pub fn replace_all(text: &str, query: &str, with: &str, case: bool) -> String {
     out.push_str(&text[last..]);
     out
 }
+/// Most matches the find bar lists and highlights in one file.
+pub const FIND_LIMIT: usize = 100_000;
 pub fn find(
     text: &ropey::Rope,
     query: &str,

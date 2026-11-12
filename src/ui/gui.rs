@@ -812,8 +812,8 @@ impl App {
             String::new()
         } else if found == 0 {
             "No results".into()
-        } else if found >= 500 {
-            "500+ matches".into()
+        } else if found >= crate::core::workspace::FIND_LIMIT {
+            format!("{}+ matches", crate::core::workspace::FIND_LIMIT)
         } else {
             format!("{} of {found}", selected + 1)
         };

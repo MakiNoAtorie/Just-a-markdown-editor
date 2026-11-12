@@ -7,7 +7,7 @@ use crate::{
     render::{self, Rect, Renderer},
 };
 use cosmic_text::{
-    Attrs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, Weight, Wrap,
+    Attrs, BidiParagraphs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, Weight, Wrap,
 };
 use std::collections::VecDeque;
 
@@ -63,8 +63,12 @@ pub struct EditorView {
     cache: VecDeque<Tile>,
     table: Option<TableScan>,
     desired_x: Option<i32>,
+    /// Cursor and revision after the last Up/Down.
+    vertical: Option<(usize, u64)>,
     palette: render::theme::Palette,
     history: Vec<usize>,
+    /// Top and revision after the last scroll; `history` is valid only while both match.
+    scrolled: (usize, u64),
     /// Sorted char ranges to tint, e.g. every match of the find bar.
     pub highlights: Vec<(usize, usize)>,
 }
@@ -133,6 +137,23 @@ fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fo
     buffer.shape_until_scroll(fonts, false);
     buffer
 }
+/// Line start bytes split like `set_rich_text` (also at U+001C etc.); a trailing separator adds an end entry.
+fn line_starts(text: &str) -> Vec<usize> {
+    let base = text.as_ptr() as usize;
+    let mut starts = vec![0];
+    let mut end = 0;
+    for (i, line) in BidiParagraphs::new(text).enumerate() {
+        let start = line.as_ptr() as usize - base;
+        if i > 0 {
+            starts.push(start);
+        }
+        end = start + line.len();
+    }
+    if end < text.len() {
+        starts.push(text.len());
+    }
+    starts
+}
 impl EditorView {
     /// How `line` should be drawn if it belongs to a pipe table: its role and the column widths.
     fn table_row(
@@ -189,7 +210,50 @@ impl EditorView {
         self.tiles.clear();
         self.cache.clear();
     }
+    fn caret(&self, cursor: usize) -> Option<(f32, f32)> {
+        // A caret at a line start is also the end of the previous tile, which has no row for it.
+        self.tiles
+            .iter()
+            .filter(|t| cursor >= t.start && cursor <= t.start + t.preview.end)
+            .find_map(|t| t.caret(cursor))
+    }
     pub fn layout(
+        &mut self,
+        doc: &Document,
+        blocks: &BlockIndex,
+        settings: &Settings,
+        fonts: &mut FontSystem,
+        rect: Rect,
+    ) {
+        self.fill(doc, blocks, settings, fonts, rect);
+        if !settings.typewriter {
+            return;
+        }
+        let middle = rect.height as f32 * 0.5;
+        let row = settings.font_size * 1.65;
+        // Move `top` so the caret sits near the middle and the pane stays full; passes are bounded.
+        for _ in 0..3 {
+            let Some((_, y)) = self.caret(doc.cursor) else {
+                break;
+            };
+            let rows = ((y - middle) / row) as i32;
+            let top = self.top;
+            if rows != 0 {
+                self.scroll(doc, rows);
+            }
+            if self.top == top {
+                break;
+            }
+            self.fill(doc, blocks, settings, fonts, rect);
+        }
+        if let Some((_, y)) = self.caret(doc.cursor) {
+            let shift = middle - y;
+            for tile in &mut self.tiles {
+                tile.y += shift;
+            }
+        }
+    }
+    fn fill(
         &mut self,
         doc: &Document,
         blocks: &BlockIndex,
@@ -268,17 +332,19 @@ impl EditorView {
                     }
                     None => flowing(fonts),
                 };
-                let height = buffer
+                let mut height = buffer
                     .layout_runs()
                     .map(|run| run.line_top + run.line_height)
                     .last()
                     .unwrap_or(settings.font_size * 1.65);
-                let mut line_bytes = vec![0];
-                for (b, c) in preview.text.char_indices() {
-                    if c == '\n' {
-                        line_bytes.push(b + 1);
-                    }
+                // Non-ASCII CRLF text gets an extra empty row; that newline belongs to the next tile.
+                if source.ends_with('\n')
+                    && buffer.lines.len() > 1
+                    && buffer.lines.last().is_some_and(|line| line.text().is_empty())
+                {
+                    height -= settings.font_size * 1.65;
                 }
+                let line_bytes = line_starts(&preview.text);
                 Tile {
                     start,
                     y,
@@ -296,18 +362,12 @@ impl EditorView {
             };
             tile.start = start;
             tile.y = y;
-            // A terminating newline belongs to the next tile, not an extra blank layout row.
-            let height = if tile.source.ends_with('\n') && tile.buffer.lines.len() > 1 {
-                tile.height - settings.font_size * 1.65
-            } else {
-                tile.height
-            };
             if tile.preview.row == Some(RowKind::Delimiter) {
                 // The header rule takes a sliver, not a blank line.
                 tile.height = 3.;
                 y += 3.;
             } else {
-                y += height.max(settings.font_size * 1.65);
+                y += tile.height.max(settings.font_size * 1.65);
             }
             self.tiles.push(tile);
             if end == doc.text.len_chars() {
@@ -317,19 +377,6 @@ impl EditorView {
         }
         while self.cache.len() > 128 {
             self.cache.pop_front();
-        }
-        if settings.typewriter {
-            if let Some((_, y)) = self
-                .tiles
-                .iter()
-                .find(|t| doc.cursor >= t.start && doc.cursor <= t.start + t.preview.end)
-                .and_then(|t| t.caret(doc.cursor))
-            {
-                let shift = rect.height as f32 * 0.5 - y;
-                for tile in &mut self.tiles {
-                    tile.y += shift;
-                }
-            }
         }
     }
     pub fn paint(&mut self, doc: &Document, fonts: &mut FontSystem, renderer: &mut impl Renderer) {
@@ -548,34 +595,43 @@ impl EditorView {
             return;
         };
         let down = matches!(motion, Motion::Down | Motion::PageDown);
-        for attempt in 0..2 {
-            let position = self
-                .tiles
-                .iter()
-                .find(|t| doc.cursor >= t.start && doc.cursor <= t.start + t.preview.end)
-                .and_then(|t| t.caret(doc.cursor));
+        // The column sticks only across consecutive vertical moves.
+        if self.vertical != Some((doc.cursor, doc.revision)) {
+            self.desired_x = None;
+        }
+        for attempt in 0..3 {
+            let position = self.caret(doc.cursor);
             if let Some((x, y)) = position {
                 let step = settings.font_size * 1.65;
                 let target_y = y + if down { step * 1.5 } else { -step * 0.5 };
-                self.desired_x = Some(self.desired_x.unwrap_or(x as i32));
+                let desired_x = *self.desired_x.get_or_insert(x as i32);
                 if target_y >= 0. && target_y < rect.height as f32 {
-                    if let Some(source) = self.hit(
-                        rect.x as f32 + self.desired_x.unwrap() as f32,
-                        rect.y as f32 + target_y,
-                    ) {
+                    if let Some(source) =
+                        self.hit(rect.x as f32 + desired_x as f32, rect.y as f32 + target_y)
+                    {
                         doc.select(source, extend);
                     }
+                    self.vertical = Some((doc.cursor, doc.revision));
                     return;
                 }
             }
-            if attempt == 0 {
-                self.scroll(doc, if down { 4 } else { -4 });
+            if attempt < 2 {
+                if position.is_none() {
+                    // The caret is off screen: show it first, then move from it.
+                    self.ensure_cursor(doc);
+                } else {
+                    self.scroll(doc, if down { 4 } else { -4 });
+                }
                 self.layout(doc, blocks, settings, fonts, rect);
             }
         }
         doc.select(if down { doc.text.len_chars() } else { 0 }, extend);
+        self.vertical = Some((doc.cursor, doc.revision));
     }
     pub fn scroll(&mut self, doc: &Document, rows: i32) {
+        if self.scrolled != (self.top, doc.revision) {
+            self.history.clear();
+        }
         if rows > 0 {
             let mut starts = Vec::new();
             for tile in &self.tiles {
@@ -598,15 +654,13 @@ impl EditorView {
             if self.history.len() > 4096 {
                 self.history.drain(..2048);
             }
-        } else {
-            if !self.history.is_empty() {
-                for _ in 0..-rows {
-                    if let Some(top) = self.history.pop() {
-                        self.top = top.min(doc.text.len_chars());
-                    }
+        } else if !self.history.is_empty() {
+            for _ in 0..-rows {
+                if let Some(top) = self.history.pop() {
+                    self.top = top.min(doc.text.len_chars());
                 }
-                return;
             }
+        } else {
             let line = doc.text.char_to_line(self.top);
             let start = doc.text.line_to_char(line);
             if self.top > start {
@@ -615,6 +669,7 @@ impl EditorView {
                 self.top = doc.text.line_to_char(line.saturating_sub(-rows as usize));
             }
         }
+        self.scrolled = (self.top, doc.revision);
     }
     pub fn ensure_cursor(&mut self, doc: &Document) {
         let visible_end = self
@@ -702,5 +757,24 @@ mod tests {
         for cursor in 0..=small.chars().count() {
             kinds(small, cursor, 300, false);
         }
+    }
+    #[test]
+    fn separators_and_crlf_lay_out_one_row_per_line() {
+        // cosmic-text breaks at U+001C and U+2029 too, and adds an empty row after a non-ASCII CRLF line.
+        let text = "é\r\na\u{1c}b\u{2029}c\r\nend";
+        let mut doc = Document::new(Rope::from_str(text));
+        doc.select(doc.text.len_chars(), false);
+        let mut blocks = BlockIndex::default();
+        blocks.update(&doc.text, 0);
+        let settings = Settings::default();
+        let mut view = EditorView::default();
+        let rect = Rect { x: 0, y: 0, width: 800, height: 600 };
+        FONTS.with(|fonts| view.layout(&doc, &blocks, &settings, &mut fonts.borrow_mut(), rect));
+        let row = settings.font_size * 1.65;
+        assert!(view.tiles[0].height <= row + 0.5, "{}", view.tiles[0].height);
+        assert_eq!(view.hit(1., view.tiles[0].height - 1.), Some(0));
+        view.scroll(&doc, 1);
+        view.scroll(&doc, -1);
+        assert_eq!(view.top, 0);
     }
 }

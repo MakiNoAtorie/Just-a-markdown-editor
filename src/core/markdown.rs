@@ -122,7 +122,7 @@ impl BlockIndex {
         };
         for line in from..count {
             let prefix: String = rope.line(line).chars().take(512).collect();
-            let trimmed = prefix.trim_start_matches(' ');
+            let trimmed = prefix.trim_start_matches('\u{FEFF}').trim_start_matches(' ');
             let indentation = prefix.len() - trimmed.len();
             let before = state;
             if indentation <= 3 {
@@ -149,14 +149,15 @@ impl BlockIndex {
                 && (1..=6).contains(&level)
                 && trimmed.as_bytes().get(level) == Some(&b' ')
             {
-                Some((
-                    level as u8,
-                    trimmed[level..]
-                        .trim()
-                        .trim_end_matches('#')
-                        .trim()
-                        .to_owned(),
-                ))
+                // Closing hashes count only after a space, so "# C#" keeps its name.
+                let text = trimmed[level..].trim();
+                let stripped = text.trim_end_matches('#');
+                let text = if stripped.is_empty() || stripped.ends_with(' ') {
+                    stripped.trim()
+                } else {
+                    text
+                };
+                Some((level as u8, text.to_owned()))
             } else {
                 None
             };
@@ -214,8 +215,11 @@ fn present_with(
     let mut char_offset = start;
     let mut code = initial_code;
     for (line_i, line) in source.split_inclusive('\n').enumerate() {
-        let trimmed = line.trim_start();
-        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        // A byte order mark stays in the file but is parsed and drawn as absent.
+        let bom = if line.starts_with('\u{FEFF}') { 3 } else { 0 };
+        let trimmed = line[bom..].trim_start();
+        let fence = (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
+            && line.len() - trimmed.len() - bom <= 3;
         let is_code = code || fence;
         let raw = show_markers || cursor_line == Some(line_i);
         let mut styles = vec![
@@ -230,11 +234,12 @@ fn present_with(
         if !is_code {
             let mut style = Style::default();
             for (event, range) in Parser::new_ext(
-                line,
+                &line[bom..],
                 Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS,
             )
             .into_offset_iter()
             {
+                let range = range.start + bom..range.end + bom;
                 match event {
                     Event::Start(tag) => match tag {
                         Tag::Strong => style.bold = true,
@@ -309,7 +314,10 @@ fn present_with(
             }
             // Lists keep their bullets, numbering and indentation as layout cues.
             let leading = line.len() - trimmed.len();
-            let list_prefix = if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
+            // A task box replaces its bullet.
+            let list_prefix = if !task_ranges.is_empty() {
+                leading
+            } else if ["- ", "* ", "+ "].iter().any(|m| trimmed.starts_with(m)) {
                 leading + 2
             } else {
                 let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
@@ -339,13 +347,14 @@ fn present_with(
             } else {
                 task_ranges.iter().find(|(range, _)| range.contains(&index))
             };
-            let visible =
-                raw || (task.is_none() && keep[index]) || matches!(character, '\r' | '\n');
+            let visible = index >= bom
+                && (raw || (task.is_none() && keep[index]) || matches!(character, '\r' | '\n'));
             if let Some((range, checked)) = task {
                 if index == range.start {
                     let position = output.text.len();
                     output.source.push((position, char_offset + 1));
-                    output.text.push(if *checked { '☑' } else { '☐' });
+                    // U+2611 has emoji presentation and draws in color; U+1F5F9 stays a text glyph.
+                    output.text.push(if *checked { '\u{1F5F9}' } else { '☐' });
                     output.text.push(' ');
                     output.spans.push(Span {
                         bytes: position..output.text.len(),
@@ -583,7 +592,7 @@ pub fn format_at(line: &str, col: usize) -> Format {
     let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
     format.numbered = digits > 0 && trimmed[digits..].starts_with(". ");
     let chars: Vec<char> = line.chars().collect();
-    let mut i = line.len() - trimmed.len();
+    let mut i = chars.iter().take_while(|c| c.is_whitespace()).count();
     if list {
         i += 1; // the list marker is not emphasis
     }
@@ -709,5 +718,18 @@ mod tests {
             assert_eq!(index.headings, fresh.headings);
             assert_eq!(index.lines, fresh.lines);
         }
+    }
+    #[test]
+    fn headings_keep_inner_hashes_and_ignore_a_byte_order_mark() {
+        let text = Rope::from_str("\u{FEFF}# Title\n# C#\n## Done ##\n");
+        let mut index = BlockIndex::default();
+        index.update(&text, 0);
+        let names: Vec<_> = index.headings.values().map(|h| h.1.as_str()).collect();
+        assert_eq!(names, ["Title", "C#", "Done"]);
+        let preview = present("\u{FEFF}# Title", 0, None, false, false);
+        assert_eq!(preview.text, "Title");
+        let task = present("- [x] done", 0, None, false, false);
+        assert!(!task.text.starts_with('-'));
+        assert!(format_at("\u{3000}**b**", 3).bold);
     }
 }

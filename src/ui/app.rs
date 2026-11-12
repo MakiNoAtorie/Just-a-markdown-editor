@@ -57,10 +57,12 @@ pub enum UserEvent {
     Listed(u64, PathBuf, Vec<Entry>),
     Files(u64, Arc<Vec<PathBuf>>),
     Rows(u64, Vec<Row>),
-    Config(Result<(Settings, Option<Session>), String>),
+    /// Settings, session, and the settings.toml error if the file was rejected.
+    Config(Settings, Option<Session>, Option<String>),
     Operation(u64, FileOp, Result<(), String>),
     Error(String),
-    SessionSaved(Result<(), String>),
+    /// True for the final write before quit.
+    SessionSaved(bool, Result<(), String>),
     Replaced(u64, u64, u64, Rope),
     ConfigWatch(notify::RecommendedWatcher),
     ConfigChanged,
@@ -190,6 +192,8 @@ pub struct App {
     popup: Option<Popup>,
     hover: Option<usize>,
     cursor_icon: CursorIcon,
+    /// settings.toml did not parse; do not overwrite it with defaults.
+    settings_error: bool,
     dividers: Vec<Divider>,
     widths: HashMap<String, f32>,
     in_modal: bool,
@@ -313,6 +317,7 @@ impl App {
             popup: None,
             hover: None,
             cursor_icon: CursorIcon::Default,
+            settings_error: false,
             dividers: Vec::new(),
             widths: HashMap::new(),
             in_modal: false,
@@ -394,6 +399,10 @@ impl App {
                 dirty,
             });
         }
+    }
+    /// The active tab if it accepts edits; chunks of a loading file would land after the edits.
+    fn editable_id(&self) -> Option<u64> {
+        self.active_id().filter(|id| self.tabs.get(id).is_some_and(|t| !t.loading))
     }
     fn edited(&mut self, id: u64) {
         self.dirty_session();
@@ -737,11 +746,9 @@ impl App {
                 dirty: 0..0,
             });
             if let Some(path) = &tab.path {
+                // Keep the absolute root: the workspace can change before Reopen.
                 self.closed.push(SessionTab {
-                    root: tab
-                        .root
-                        .clone()
-                        .filter(|root| Some(root) != self.root.as_ref()),
+                    root: tab.root.clone(),
                     path: path.clone(),
                     cursor: tab.document.cursor,
                     top: tab.view.top,
@@ -1052,7 +1059,8 @@ impl App {
                         }
                         Kind::Find | Kind::Replace => {
                             if let Some((text, path)) = snapshot {
-                                rows = workspace::find(&text, &query, case, 500)
+                                // ponytail: rows double as highlights, capped to bound memory; store bare ranges if files need more matches.
+                                rows = workspace::find(&text, &query, case, workspace::FIND_LIMIT)
                                     .into_iter()
                                     .map(|(start, end, line, preview)| Row {
                                         label: preview.clone(),
@@ -1114,15 +1122,19 @@ impl App {
         }
     }
     fn save_settings(&mut self) {
-        let storage = self.config_storage.clone();
-        let text = Rope::from_str(&self.settings.serialize());
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            if let Err(error) = storage.write(Path::new("settings.toml"), &text) {
-                let _ =
-                    proxy.send_event(UserEvent::Error(format!("Cannot save settings: {error}")));
-            }
-        });
+        if self.settings_error {
+            self.status = "settings.toml has an error, so this change is not saved".into();
+        } else {
+            let storage = self.config_storage.clone();
+            let text = Rope::from_str(&self.settings.serialize());
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = storage.write(Path::new("settings.toml"), &text) {
+                    let _ = proxy
+                        .send_event(UserEvent::Error(format!("Cannot save settings: {error}")));
+                }
+            });
+        }
         self.labels.clear();
         for tab in self.tabs.values_mut() {
             tab.view.clear_cache();
@@ -1383,9 +1395,8 @@ impl App {
                 _ => {}
             }
         } else {
-            self.after_save = Some(kind.clone());
-            let ids: Vec<_> = match kind {
-                Kind::Close(id) => vec![id],
+            let ids: Vec<_> = match &kind {
+                Kind::Close(id) => vec![*id],
                 _ => self
                     .tabs
                     .iter()
@@ -1393,6 +1404,17 @@ impl App {
                     .map(|(id, _)| *id)
                     .collect(),
             };
+            // save() sends no Saved event for these tabs, so the dialog would wait forever.
+            if let Some(tab) = ids
+                .iter()
+                .filter_map(|id| self.tabs.get(id))
+                .find(|t| t.loading || t.failed)
+            {
+                self.status = format!("Cannot save {}: the file did not load completely.", tab.name());
+                self.redraw();
+                return;
+            }
+            self.after_save = Some(kind);
             for id in ids {
                 self.save(id, false);
             }
@@ -1460,7 +1482,7 @@ impl App {
             self.note("Enter text to find before replacing.");
             return;
         }
-        let Some(id) = self.active_id() else {
+        let Some(id) = self.editable_id() else {
             return;
         };
         let Some(tab) = self.tabs.get_mut(&id) else {
@@ -1748,6 +1770,7 @@ impl App {
     fn command(&mut self, command: Command) {
         self.dirty_session();
         let active = self.active_id();
+        let editable = self.editable_id();
         match command {
             Command::Open => self.choose(Choose::Folder),
             Command::OpenFile => self.choose(Choose::File),
@@ -1784,7 +1807,9 @@ impl App {
             }
             Command::Reopen => {
                 if let Some(saved) = self.closed.pop() {
-                    if let Split::Pane(restored) = self.restore_split(SessionSplit::Pane {
+                    if saved.root.is_some() && saved.root == self.root {
+                        self.open_relative(saved.path, saved.cursor);
+                    } else if let Split::Pane(restored) = self.restore_split(SessionSplit::Pane {
                         tabs: vec![saved],
                         active: 0,
                     }) {
@@ -1807,7 +1832,7 @@ impl App {
                 }
             }
             Command::Undo | Command::Redo => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     if let Some(tab) = self.tabs.get_mut(&id) {
                         if command == Command::Undo {
                             tab.document.undo();
@@ -1832,7 +1857,7 @@ impl App {
                     if !range.is_empty() {
                         let text = tab.document.text.slice(range).to_string();
                         match self.clipboard.write(text) {
-                            Ok(()) if command == Command::Cut => {
+                            Ok(()) if command == Command::Cut && editable.is_some() => {
                                 self.tabs.get_mut(&id).unwrap().document.insert("");
                                 self.edited(id);
                             }
@@ -1843,7 +1868,7 @@ impl App {
                 }
             }
             Command::Paste => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     match self.clipboard.read() {
                         Ok(text) => {
                             let tab = self.tabs.get_mut(&id).unwrap();
@@ -1869,7 +1894,7 @@ impl App {
             | Command::Link
             | Command::Indent
             | Command::Outdent => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     let doc = &mut self.tabs.get_mut(&id).unwrap().document;
                     match command {
                         Command::Bold => doc.surround("**", "**"),
@@ -1945,8 +1970,15 @@ impl App {
                             | pulldown_cmark::Options::ENABLE_TASKLISTS;
                         let source = text.to_string();
                         pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new_ext(&source, options));
-                        let message = match storage.write(&path, &Rope::from_str(&html)) {
+                        // create_new refuses an existing file, so an earlier export is never overwritten.
+                        let result = storage
+                            .create(&path, false)
+                            .and_then(|()| storage.write(&path, &Rope::from_str(&html)));
+                        let message = match result {
                             Ok(()) => format!("Exported {}", path.display()),
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                format!("{} exists. Delete or rename it, then export again.", path.display())
+                            }
                             Err(error) => format!("Cannot export: {error}"),
                         };
                         let _ = proxy.send_event(UserEvent::Error(message));
@@ -2241,20 +2273,20 @@ impl App {
                 );
                 tab.document.select(tab.view.top, shift);
             }
-            Key::Named(NamedKey::Backspace) => {
+            Key::Named(NamedKey::Backspace) if !tab.loading => {
                 tab.document.delete(true);
                 edited = true;
             }
-            Key::Named(NamedKey::Delete) => {
+            Key::Named(NamedKey::Delete) if !tab.loading => {
                 tab.document.delete(false);
                 edited = true;
             }
-            Key::Named(NamedKey::Enter) => {
+            Key::Named(NamedKey::Enter) if !tab.loading => {
                 tab.document.enter();
                 edited = true;
             }
             Key::Character(_)
-                if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
+                if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() && !tab.loading =>
             {
                 if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
                     tab.document.type_text(text);
@@ -2344,7 +2376,7 @@ impl App {
             let result = storage
                 .write(Path::new("session.toml"), &Rope::from_str(&text))
                 .map_err(|e| e.to_string());
-            let _ = proxy.send_event(UserEvent::SessionSaved(result));
+            let _ = proxy.send_event(UserEvent::SessionSaved(close, result));
         });
     }
     fn restore_split(&mut self, split: SessionSplit) -> Split {
@@ -2717,9 +2749,11 @@ impl App {
                     let session = read_complete(&*storage, Path::new("session.toml"))
                         .ok()
                         .and_then(|text| toml::from_str::<Session>(&text.to_string()).ok());
-                    let _ = proxy.send_event(UserEvent::Config(
-                        settings.map(|settings| (settings, session)),
-                    ));
+                    let (settings, error) = match settings {
+                        Ok(settings) => (settings, None),
+                        Err(error) => (Settings::default(), Some(error)),
+                    };
+                    let _ = proxy.send_event(UserEvent::Config(settings, session, error));
                     let watch_proxy = proxy.clone();
                     if let Ok(watcher) = storage.watch(Arc::new(move |path| {
                         if path == Path::new("settings.toml") {
@@ -2817,7 +2851,7 @@ impl App {
         let Some(tab) = self.tabs.get_mut(&id) else {
             return;
         };
-        if count == 1 {
+        if count == 1 && !tab.loading {
             if let Some((index, checked)) = tab.view.checkbox_at(x as f32, y as f32) {
                 tab.document
                     .replace(index..index + 1, if checked { " " } else { "x" });
@@ -3189,7 +3223,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Chosen(Some(root), Choose::Folder) => self.switch_workspace(root),
             UserEvent::Chosen(Some(path), Choose::File) => self.open_absolute(path),
             UserEvent::Chosen(Some(path), Choose::Save(id)) => {
-                if self.tabs.get(&id).is_some_and(|t| t.saving) {
+                // The tab can close while the dialog is open.
+                let Some(tab) = self.tabs.get(&id) else {
+                    self.after_save = None;
+                    return;
+                };
+                if tab.saving {
                     self.status =
                         "A save is in progress. Please retry Save as when it finishes.".into();
                     self.after_save = None;
@@ -3255,6 +3294,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 if cursor <= tab.document.text.len_chars() {
                                     tab.document.select(cursor, false);
                                     tab.restore_cursor = None;
+                                    // A restored session sets top; a fresh open scrolls to the cursor.
+                                    if tab.view.top == 0 {
+                                        tab.view.ensure_cursor(&tab.document);
+                                    }
                                 }
                             }
                         }
@@ -3262,6 +3305,9 @@ impl ApplicationHandler<UserEvent> for App {
                             tab.loading = false;
                             if let Some(cursor) = tab.restore_cursor.take() {
                                 tab.document.select(cursor, false);
+                                if tab.view.top == 0 {
+                                    tab.view.ensure_cursor(&tab.document);
+                                }
                             }
                             self.scan(id, true);
                         }
@@ -3301,6 +3347,10 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             _ => self.tabs.values().all(|t| !t.document.dirty()),
                         };
+                        let target = match after {
+                            Kind::Close(close) => close == id,
+                            _ => true,
+                        };
                         if done {
                             self.after_save = None;
                             self.overlay = None;
@@ -3313,6 +3363,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 _ => {}
                             }
+                        } else if target && self.tabs.get(&id).is_some_and(|t| t.document.dirty()) {
+                            // This save was for an older revision; save again so the dialog can finish.
+                            self.save(id, false);
                         }
                     }
                 }
@@ -3436,8 +3489,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.preview_match();
             }
-            UserEvent::Config(result) => match result {
-                Ok((settings, session)) => {
+            UserEvent::Config(settings, session, error) => {
+                {
+                    if let Some(error) = error {
+                        self.status = format!("Settings error: {error}");
+                        self.settings_error = true;
+                    }
                     self.adopt(settings);
                     self.labels.clear();
                     self.apply_window_theme();
@@ -3445,12 +3502,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .skip(1)
                         .find(|s| !s.to_string_lossy().starts_with("--"));
                     if self.tabs.values().all(|t| !t.document.dirty()) {
-                        if let Some(path) = argument {
-                            self.open_absolute(PathBuf::from(path));
-                        } else if let Some(session) = session {
-                            if let Some(root) = session.workspace {
-                                self.set_workspace(root);
-                            }
+                        if let Some(session) = &session {
                             self.tree_width = if (130.0..=420.0).contains(&session.tree_width) {
                                 session.tree_width
                             } else {
@@ -3465,6 +3517,14 @@ impl ApplicationHandler<UserEvent> for App {
                             self.recent = session.recent.clone();
                             self.show_tree = session.show_tree;
                             self.show_outline = session.show_outline;
+                        }
+                        // A file argument replaces the saved workspace and tabs, not the panels.
+                        if let Some(path) = argument {
+                            self.open_absolute(PathBuf::from(path));
+                        } else if let Some(session) = session {
+                            if let Some(root) = session.workspace {
+                                self.set_workspace(root);
+                            }
                             if let Some(split) = session.split {
                                 self.tabs.clear();
                                 self.split = self.restore_split(split);
@@ -3473,8 +3533,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
-                Err(error) => self.status = format!("Settings error: {error}"),
-            },
+            }
             UserEvent::Operation(generation, operation, result)
                 if generation == self.generation =>
             {
@@ -3524,11 +3583,13 @@ impl ApplicationHandler<UserEvent> for App {
                     Err(error) => self.status = error,
                 }
             }
-            UserEvent::SessionSaved(result) => match result {
-                Ok(()) if self.session_closing => event_loop.exit(),
+            UserEvent::SessionSaved(closing, result) => match result {
+                Ok(()) if closing => event_loop.exit(),
                 Ok(()) => {}
                 Err(error) => {
-                    self.session_closing = false;
+                    if closing {
+                        self.session_closing = false;
+                    }
                     self.status = format!("Cannot save session: {error}");
                 }
             },
@@ -3559,6 +3620,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SettingsUpdated(result) => match result {
                 Ok(settings) => {
+                    self.settings_error = false;
                     self.adopt(settings);
                     self.labels.clear();
                     for tab in self.tabs.values_mut() {
@@ -3566,7 +3628,10 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.apply_window_theme();
                 }
-                Err(error) => self.status = format!("Settings error: {error}"),
+                Err(error) => {
+                    self.settings_error = true;
+                    self.status = format!("Settings error: {error}");
+                }
             },
             _ => {}
         }
@@ -3630,7 +3695,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(overlay) = self.overlay.as_mut().filter(|o| o.focused) {
                     overlay.type_text(&text);
                     self.refresh_overlay();
-                } else if let Some(id) = self.active_id() {
+                } else if let Some(id) = self.editable_id() {
                     self.tabs.get_mut(&id).unwrap().document.insert(&text);
                     self.edited(id);
                 }
@@ -3735,7 +3800,7 @@ mod tests {
             self.first = self.app.open_relative("first.md".into(), 0).unwrap();
         }
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-            if matches!(&event, UserEvent::SessionSaved(Ok(()))) {
+            if matches!(&event, UserEvent::SessionSaved(_, Ok(()))) {
                 self.session_saved = true;
             }
             self.app.user_event(event_loop, event);

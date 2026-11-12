@@ -221,31 +221,43 @@ impl Document {
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
         let trimmed = prefix.trim_start();
+        // Only an item with no text at all ends the list.
+        let after_blank = self
+            .text
+            .chars_at(self.cursor)
+            .take_while(|c| *c != '\n' && *c != '\r')
+            .take(512)
+            .all(char::is_whitespace);
         let mut continuation = String::new();
-        for marker in ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "- ", "* ", "+ "] {
-            if let Some(rest) = trimmed.strip_prefix(marker) {
-                if rest.is_empty() {
+        for bullet in ["- ", "* ", "+ "] {
+            if let Some(mut rest) = trimmed.strip_prefix(bullet) {
+                continuation = bullet.to_owned();
+                for task in ["[ ] ", "[x] ", "[X] "] {
+                    if let Some(after) = rest.strip_prefix(task) {
+                        continuation.push_str("[ ] ");
+                        rest = after;
+                    }
+                }
+                if rest.is_empty() && after_blank {
                     self.replace(start..self.cursor, "");
                     return;
                 }
-                continuation = marker.replace("[x]", "[ ]");
                 break;
             }
         }
         if continuation.is_empty() {
             let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-            if let Some(rest) = trimmed
-                .strip_prefix(&digits)
-                .and_then(|s| s.strip_prefix(". "))
+            let after = trimmed.strip_prefix(&digits).unwrap_or_default();
+            let delimiter = after.chars().next().filter(|c| matches!(c, '.' | ')'));
+            if let (false, Some(delimiter), Some(rest)) =
+                (digits.is_empty(), delimiter, after.get(1..).and_then(|s| s.strip_prefix(' ')))
             {
-                if !digits.is_empty() {
-                    if rest.is_empty() {
-                        self.replace(start..self.cursor, "");
-                        return;
-                    }
-                    continuation =
-                        format!("{}. ", digits.parse::<u64>().unwrap_or(0).saturating_add(1));
+                if rest.is_empty() && after_blank {
+                    self.replace(start..self.cursor, "");
+                    return;
                 }
+                let next = digits.parse::<u64>().unwrap_or(0).saturating_add(1);
+                continuation = format!("{next}{delimiter} ");
             }
         }
         self.insert(&format!("{}{indent}{continuation}", self.line_ending));
@@ -270,8 +282,11 @@ impl Document {
             return;
         }
         if let Some(close) = close {
-            // Apostrophes within words are literal, not quote pairs.
-            if text == "'" && self.cursor > 0 && self.text.char(self.cursor - 1).is_alphanumeric() {
+            // Apostrophes within words are literal, and a backtick after one builds a fence.
+            let before = (self.cursor > 0).then(|| self.text.char(self.cursor - 1));
+            if (text == "'" && before.is_some_and(char::is_alphanumeric))
+                || (text == "`" && before == Some('`'))
+            {
                 self.insert(text);
                 return;
             }
@@ -327,14 +342,7 @@ impl Document {
             }
             return;
         }
-        let first = self.text.char_to_line(self.selection().start);
-        let last = self.text.char_to_line(self.selection().end);
-        let start = self.text.line_to_char(first);
-        let end = if last + 1 < self.text.len_lines() {
-            self.text.line_to_char(last + 1)
-        } else {
-            self.text.len_chars()
-        };
+        let (start, end) = self.selected_lines();
         let source = self.text.slice(start..end).to_string();
         let mut output = String::new();
         for line in source.split_inclusive('\n') {
@@ -351,6 +359,22 @@ impl Document {
             }
         }
         self.replace(start..end, &output);
+    }
+    /// Char range of the whole lines the selection touches. A selection that ends at
+    /// the start of a line does not include that line.
+    fn selected_lines(&self) -> (usize, usize) {
+        let range = self.selection();
+        let first = self.text.char_to_line(range.start);
+        let mut last = self.text.char_to_line(range.end);
+        if last > first && self.text.line_to_char(last) == range.end {
+            last -= 1;
+        }
+        let end = if last + 1 < self.text.len_lines() {
+            self.text.line_to_char(last + 1)
+        } else {
+            self.text.len_chars()
+        };
+        (self.text.line_to_char(first), end)
     }
     pub fn indent(&mut self, outdent: bool) {
         let range = self.selection();
@@ -379,14 +403,7 @@ impl Document {
             }
             return;
         }
-        let first = self.text.char_to_line(range.start);
-        let last = self.text.char_to_line(range.end);
-        let start = self.text.line_to_char(first);
-        let end = if last + 1 < self.text.len_lines() {
-            self.text.line_to_char(last + 1)
-        } else {
-            self.text.len_chars()
-        };
+        let (start, end) = self.selected_lines();
         let source = self.text.slice(start..end).to_string();
         let output: String = source
             .split_inclusive('\n')
@@ -457,6 +474,29 @@ mod tests {
         doc.type_text("(");
         doc.type_text(")");
         assert!(doc.text.to_string().ends_with("日本語()"));
+    }
+    #[test]
+    fn lists_continue_and_selections_stop_at_line_starts() {
+        let enter = |text: &str, cursor: usize| {
+            let mut doc = Document::new(Rope::from_str(text));
+            doc.select(cursor, false);
+            doc.enter();
+            doc.text.to_string()
+        };
+        assert_eq!(enter("- item", 2), "- \n- item");
+        assert_eq!(enter("- ", 2), "");
+        assert_eq!(enter("+ [X] a", 7), "+ [X] a\n+ [ ] ");
+        assert_eq!(enter("9) a", 4), "9) a\n10) ");
+        let mut doc = Document::new(Rope::from_str("a\nb\nc"));
+        doc.anchor = 0;
+        doc.cursor = 4;
+        doc.indent(false);
+        assert_eq!(doc.text.to_string(), "    a\n    b\nc");
+        let mut doc = Document::new(Rope::new());
+        for _ in 0..3 {
+            doc.type_text("`");
+        }
+        assert_eq!(doc.text.to_string(), "```");
     }
     #[test]
     fn deleted_selection_is_logged_without_flattening_the_file() {
