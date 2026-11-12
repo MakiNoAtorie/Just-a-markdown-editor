@@ -205,7 +205,6 @@ pub struct App {
     wheel: f32,
     session_due: Option<Instant>,
     system_light: bool,
-    scale_override: Option<f32>,
     hover_since: Option<Instant>,
     recent: Vec<PathBuf>,
     saved_window: Option<WindowState>,
@@ -329,7 +328,6 @@ impl App {
             wheel: 0.,
             session_due: None,
             system_light: false,
-            scale_override: std::env::var("JAME_SCALE").ok().and_then(|v| v.parse().ok()),
             hover_since: None,
             recent: Vec::new(),
             saved_window: None,
@@ -473,15 +471,31 @@ impl App {
         self.expanded = BTreeSet::from([PathBuf::from(".")]);
         self.list(PathBuf::from("."));
         self.index_files();
-        let proxy = self.proxy.clone();
         let generation = self.generation;
+        self.spawn_watch(
+            storage,
+            move |path| Some(UserEvent::Changed(generation, path)),
+            move |watcher| UserEvent::Watched(generation, watcher),
+        );
+        self.redraw();
+    }
+    /// Starts a watcher off the UI thread; `changed` maps each changed path to an optional event.
+    fn spawn_watch(
+        &self,
+        storage: Arc<dyn Storage>,
+        changed: impl Fn(PathBuf) -> Option<UserEvent> + Send + Sync + 'static,
+        watched: impl FnOnce(notify::RecommendedWatcher) -> UserEvent + Send + 'static,
+    ) {
+        let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let change_proxy = proxy.clone();
             match storage.watch(Arc::new(move |path| {
-                let _ = change_proxy.send_event(UserEvent::Changed(generation, path));
+                if let Some(event) = changed(path) {
+                    let _ = change_proxy.send_event(event);
+                }
             })) {
                 Ok(watcher) => {
-                    let _ = proxy.send_event(UserEvent::Watched(generation, watcher));
+                    let _ = proxy.send_event(watched(watcher));
                 }
                 Err(error) => {
                     let _ = proxy.send_event(UserEvent::Error(format!(
@@ -490,7 +504,6 @@ impl App {
                 }
             }
         });
-        self.redraw();
     }
     fn list(&self, folder: PathBuf) {
         if let Some(storage) = &self.storage {
@@ -530,24 +543,11 @@ impl App {
         let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else {
             return;
         };
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let change_proxy = proxy.clone();
-            match storage.watch(Arc::new(move |changed| {
-                if changed == path {
-                    let _ = change_proxy.send_event(UserEvent::TabChanged(id));
-                }
-            })) {
-                Ok(watcher) => {
-                    let _ = proxy.send_event(UserEvent::TabWatched(id, watcher));
-                }
-                Err(error) => {
-                    let _ = proxy.send_event(UserEvent::Error(format!(
-                        "File watching unavailable: {error}"
-                    )));
-                }
-            }
-        });
+        self.spawn_watch(
+            storage,
+            move |changed| (changed == path).then_some(UserEvent::TabChanged(id)),
+            move |watcher| UserEvent::TabWatched(id, watcher),
+        );
     }
     fn check_external(&self, id: u64) {
         let Some(tab) = self.tabs.get(&id).filter(|t| !t.loading && !t.saving) else {
@@ -571,6 +571,19 @@ impl App {
             }
         });
     }
+    /// Replaces the text of tab `id` with the disk version and keeps the cursor.
+    fn load_disk(&mut self, id: u64, text: Rope) {
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return;
+        };
+        tab.disk_epoch += 1;
+        let cursor = tab.document.cursor;
+        let old = std::mem::replace(&mut tab.document, crate::core::buffer::Document::new(text));
+        std::thread::spawn(move || drop(old));
+        tab.document.select(cursor, false);
+        tab.view.clear_cache();
+        self.scan(id, true);
+    }
     fn open_relative(&mut self, path: PathBuf, position: usize) -> Option<u64> {
         if !workspace::valid_relative(&path) {
             self.status = "Invalid workspace-relative path".into();
@@ -591,17 +604,7 @@ impl App {
                     .zip(self.storage.as_ref())
                     .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
         }) {
-            let mut leaves = Vec::new();
-            self.split.leaves(
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: 1,
-                    height: 1,
-                },
-                &mut leaves,
-            );
-            for (pane, _) in leaves {
+            for pane in self.split.pane_ids() {
                 if let Some(p) = self.split.pane_mut(pane) {
                     if let Some(index) = p.tabs.iter().position(|t| *t == id) {
                         p.active = index;
@@ -659,15 +662,19 @@ impl App {
             let _ = proxy.send_event(UserEvent::OpenResolved(platform::workspace_file(&path)));
         });
     }
+    /// Tells the scanner to drop its state for tab `id`.
+    fn forget_scan(&self, id: u64) {
+        let _ = self.scanner.send(Scan {
+            tab: id,
+            epoch: 0,
+            revision: 0,
+            rope: None,
+            dirty: 0..0,
+        });
+    }
     fn clear_tabs(&mut self) {
-        for id in self.tabs.keys() {
-            let _ = self.scanner.send(Scan {
-                tab: *id,
-                epoch: 0,
-                revision: 0,
-                rope: None,
-                dirty: 0..0,
-            });
+        for &id in self.tabs.keys() {
+            self.forget_scan(id);
         }
         let old = std::mem::take(&mut self.tabs);
         std::thread::spawn(move || drop(old));
@@ -738,13 +745,7 @@ impl App {
             return;
         }
         if let Some(tab) = self.tabs.remove(&id) {
-            let _ = self.scanner.send(Scan {
-                tab: id,
-                epoch: 0,
-                revision: 0,
-                rope: None,
-                dirty: 0..0,
-            });
+            self.forget_scan(id);
             if let Some(path) = &tab.path {
                 // Keep the absolute root: the workspace can change before Reopen.
                 self.closed.push(SessionTab {
@@ -756,20 +757,9 @@ impl App {
             }
             std::thread::spawn(move || drop(tab));
         }
-        let mut leaves = Vec::new();
-        self.split.leaves(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            &mut leaves,
-        );
-        for (pane, _) in leaves {
+        for pane in self.split.pane_ids() {
             if let Some(p) = self.split.pane_mut(pane) {
-                p.tabs.retain(|t| *t != id);
-                p.active = p.active.min(p.tabs.len().saturating_sub(1));
+                p.remove(id);
             }
         }
         self.split.remove_empty();
@@ -781,9 +771,6 @@ impl App {
         }
         self.title();
         self.redraw();
-    }
-    fn split_pane(&mut self, down: bool, move_tab: Option<(u64, u64)>) {
-        self.split_pane_at(down, false, move_tab);
     }
     /// Where dropping a dragged tab over `rect` would split: (stacked vertically, new pane first).
     fn drop_zone(&self, rect: Rect, x: f64, y: f64) -> Option<(bool, bool)> {
@@ -815,8 +802,7 @@ impl App {
         let new_pane = self.id();
         let tab = if let Some((tab, source)) = move_tab {
             if let Some(p) = self.split.pane_mut(source) {
-                p.tabs.retain(|t| *t != tab);
-                p.active = p.active.min(p.tabs.len().saturating_sub(1));
+                p.remove(tab);
             }
             tab
         } else {
@@ -852,8 +838,7 @@ impl App {
             index
         };
         if let Some(p) = self.split.pane_mut(source) {
-            p.tabs.retain(|id| *id != tab);
-            p.active = p.active.min(p.tabs.len().saturating_sub(1));
+            p.remove(tab);
         }
         if let Some(p) = self.split.pane_mut(target) {
             let index = index.min(p.tabs.len());
@@ -921,14 +906,7 @@ impl App {
                             score,
                             Row {
                                 label: command.name.into(),
-                                hint: shortcut.replace(
-                                    "Ctrl",
-                                    if cfg!(target_os = "macos") {
-                                        "Cmd"
-                                    } else {
-                                        "Ctrl"
-                                    },
-                                ),
+                                hint: shortcut.into(),
                                 action: if kind == Kind::Keymap {
                                     Action::Shortcut(command.key.into())
                                 } else {
@@ -1135,12 +1113,16 @@ impl App {
                 }
             });
         }
+        self.invalidate_text();
+        self.apply_window_theme();
+        self.redraw();
+    }
+    /// Drops cached text layout after a font, theme or settings change.
+    fn invalidate_text(&mut self) {
         self.labels.clear();
         for tab in self.tabs.values_mut() {
             tab.view.clear_cache();
         }
-        self.apply_window_theme();
-        self.redraw();
     }
     fn operation(&mut self, operation: FileOp) {
         let Some(storage) = self.storage.clone() else {
@@ -1170,19 +1152,7 @@ impl App {
                 self.overlay = None;
                 self.open_relative(path, position);
             }
-            Action::Heading(line) => {
-                if let Some(id) = self.active_id() {
-                    if let Some(tab) = self.tabs.get_mut(&id) {
-                        let position = tab
-                            .document
-                            .text
-                            .line_to_char(line.min(tab.document.text.len_lines() - 1));
-                        tab.document.select(position, false);
-                        tab.view.top = position;
-                    }
-                }
-                self.overlay = None;
-            }
+            Action::Heading(line) => self.jump_to_line(line),
             Action::Match(found) => {
                 let kind = self.overlay.as_ref().map(|o| o.kind.clone());
                 if kind == Some(Kind::FolderSearch) {
@@ -1221,7 +1191,6 @@ impl App {
                 overlay.query = query;
                 self.overlay = Some(overlay);
             }
-            Action::None => {}
         }
         self.title();
         self.redraw();
@@ -1426,9 +1395,13 @@ impl App {
             self.note("Enter a line number.");
             return;
         };
+        self.jump_to_line(line.saturating_sub(1));
+    }
+    /// Puts the cursor on 0-based `line`, scrolls it to the top, and closes the overlay.
+    fn jump_to_line(&mut self, line: usize) {
         if let Some(tab) = self.active_id().and_then(|id| self.tabs.get_mut(&id)) {
             let text = &tab.document.text;
-            let position = text.line_to_char(line.saturating_sub(1).min(text.len_lines() - 1));
+            let position = text.line_to_char(line.min(text.len_lines() - 1));
             tab.document.select(position, false);
             tab.view.top = position;
         }
@@ -1786,17 +1759,8 @@ impl App {
                 if let Some(id) = self.active_id() {
                     let tab = self.tabs.get_mut(&id).unwrap();
                     if let Some(text) = tab.external.take() {
-                        tab.disk_epoch += 1;
-                        let cursor = tab.document.cursor;
-                        let old = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(text),
-                        );
-                        std::thread::spawn(move || drop(old));
-                        tab.document.select(cursor, false);
-                        tab.view.clear_cache();
                         tab.edited = None;
-                        self.scan(id, true);
+                        self.load_disk(id, text);
                     }
                 }
             }
@@ -1989,13 +1953,11 @@ impl App {
             Command::Replace => self.show(Kind::Replace),
             Command::FolderSearch => self.show(Kind::FolderSearch),
             Command::SplitRight | Command::SplitDown => {
-                self.split_pane(command == Command::SplitDown, None)
+                self.split_pane_at(command == Command::SplitDown, false, None)
             }
             Command::CloseSplit => {
-                let mut leaves = Vec::new();
-                self.split.leaves(Rect { x: 0, y: 0, width: 1, height: 1 }, &mut leaves);
                 let from = self.active_pane;
-                if let Some(target) = leaves.iter().map(|(id, _)| *id).find(|id| *id != from) {
+                if let Some(target) = self.split.pane_ids().into_iter().find(|id| *id != from) {
                     let moved = self.split.pane(from).map(|p| p.tabs.clone()).unwrap_or_default();
                     if let Some(pane) = self.split.pane_mut(from) {
                         pane.tabs.clear();
@@ -2029,22 +1991,13 @@ impl App {
                     });
                 }
             }
-            Command::CreateFile => {
+            Command::CreateFile | Command::CreateFolder => {
                 if self.root.is_none() {
                     self.status = "Choose a folder to keep your notes in first.".into();
                     self.choose(Choose::Folder);
                 } else {
-                    let mut overlay = Overlay::new(Kind::Create);
-                    overlay.query = self.selected_folder();
-                    self.overlay = Some(overlay);
-                }
-            }
-            Command::CreateFolder => {
-                if self.root.is_none() {
-                    self.status = "Choose a folder to keep your notes in first.".into();
-                    self.choose(Choose::Folder);
-                } else {
-                    let mut overlay = Overlay::new(Kind::CreateFolder);
+                    let kind = if command == Command::CreateFile { Kind::Create } else { Kind::CreateFolder };
+                    let mut overlay = Overlay::new(kind);
                     overlay.query = self.selected_folder();
                     self.overlay = Some(overlay);
                 }
@@ -2526,7 +2479,7 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.scale = self.scale_override.unwrap_or(window.scale_factor() as f32);
+        self.scale = window.scale_factor() as f32;
         self.renderer.resize(size.width, size.height);
         self.hits.clear();
         self.pane_rects.clear();
@@ -2612,13 +2565,7 @@ impl App {
                 .and_then(|id| self.tabs.get(&id))
                 .and_then(|tab| {
                     tab.view
-                        .tiles
-                        .iter()
-                        .find(|tile| {
-                            tab.document.cursor >= tile.start
-                                && tab.document.cursor <= tile.start + tile.preview.end
-                        })
-                        .and_then(|tile| tile.caret(tab.document.cursor))
+                        .caret(tab.document.cursor)
                         .map(|(x, y)| (tab.view.rect.unwrap(), x, y))
                 });
             if let Some((rect, x, y)) = position {
@@ -2690,16 +2637,7 @@ impl App {
         }
         if let Some(id) = self.active_id() {
             let tab = &self.tabs[&id];
-            if let Some((x, y)) = tab
-                .view
-                .tiles
-                .iter()
-                .find(|tile| {
-                    tab.document.cursor >= tile.start
-                        && tab.document.cursor <= tile.start + tile.preview.end
-                })
-                .and_then(|tile| tile.caret(tab.document.cursor))
-            {
+            if let Some((x, y)) = tab.view.caret(tab.document.cursor) {
                 if let Some(rect) = tab.view.rect {
                     window.set_ime_cursor_area(
                         PhysicalPosition::new(rect.x as f64 + x as f64, rect.y as f64 + y as f64),
@@ -2965,11 +2903,7 @@ impl App {
                         self.folded.insert(line);
                     }
                 } else {
-                    self.activate_row(Row {
-                        label: String::new(),
-                        hint: String::new(),
-                        action: Action::Heading(line),
-                    });
+                    self.jump_to_line(line);
                 }
             }
             Some(Hit::Row(index)) => {
@@ -3235,20 +3169,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                     return;
                 }
-                let (root, relative) = if let Some(root) = &self.root {
-                    match path.strip_prefix(root) {
-                        Ok(relative) => (root.clone(), relative.to_path_buf()),
-                        Err(_) => (
+                let (root, relative) = self
+                    .root
+                    .as_ref()
+                    .and_then(|root| Some((root.clone(), path.strip_prefix(root).ok()?.to_path_buf())))
+                    .unwrap_or_else(|| {
+                        (
                             path.parent().unwrap_or(Path::new(".")).to_path_buf(),
                             path.file_name().map(PathBuf::from).unwrap_or_default(),
-                        ),
-                    }
-                } else {
-                    (
-                        path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                        path.file_name().map(PathBuf::from).unwrap_or_default(),
-                    )
-                };
+                        )
+                    });
                 if self.root.is_none() {
                     self.set_workspace(root.clone());
                 }
@@ -3353,16 +3283,7 @@ impl ApplicationHandler<UserEvent> for App {
                         };
                         if done {
                             self.after_save = None;
-                            self.overlay = None;
-                            match after {
-                                Kind::Close(id) => self.close_tab(id, true),
-                                Kind::Quit => self.persist_session(true),
-                                Kind::ChangeWorkspace(root) => {
-                                    self.clear_tabs();
-                                    self.set_workspace(root);
-                                }
-                                _ => {}
-                            }
+                            self.unsaved(after, true);
                         } else if target && self.tabs.get(&id).is_some_and(|t| t.document.dirty()) {
                             // This save was for an older revision; save again so the dialog can finish.
                             self.save(id, false);
@@ -3388,11 +3309,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
                 // Font IDs belong to a database; cached glyph IDs must not cross this swap.
                 self.renderer = CpuRenderer::default();
-                self.labels.clear();
                 self.widths.clear();
-                for tab in self.tabs.values_mut() {
-                    tab.view.clear_cache();
-                }
+                self.invalidate_text();
             }
             UserEvent::Watched(generation, watcher) if generation == self.generation => {
                 self.watcher = Some(watcher)
@@ -3417,27 +3335,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .map(|(id, _)| *id)
                     .collect();
                 for id in ids {
-                    let tab = &self.tabs[&id];
-                    let Some(storage) = tab.storage.clone() else {
-                        continue;
-                    };
-                    let saved = tab.document.saved_snapshot();
-                    let path = path.clone();
-                    let proxy = self.proxy.clone();
-                    let revision = tab.document.revision;
-                    let epoch = tab.disk_epoch;
-                    std::thread::spawn(move || match read_complete(&*storage, &path) {
-                        Ok(text) if text != saved => {
-                            let _ =
-                                proxy.send_event(UserEvent::External(id, epoch, revision, text));
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            let _ = proxy.send_event(UserEvent::Error(format!(
-                                "External file change: {error}"
-                            )));
-                        }
-                    });
+                    self.check_external(id);
                 }
             }
             UserEvent::External(id, epoch, revision, text) => {
@@ -3446,16 +3344,7 @@ impl ApplicationHandler<UserEvent> for App {
                         tab.external = Some(text);
                         tab.edited = None;
                     } else {
-                        tab.disk_epoch += 1;
-                        let cursor = tab.document.cursor;
-                        let old = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(text),
-                        );
-                        std::thread::spawn(move || drop(old));
-                        tab.document.select(cursor, false);
-                        tab.view.clear_cache();
-                        self.scan(id, true);
+                        self.load_disk(id, text);
                     }
                 }
             }
@@ -3622,10 +3511,7 @@ impl ApplicationHandler<UserEvent> for App {
                 Ok(settings) => {
                     self.settings_error = false;
                     self.adopt(settings);
-                    self.labels.clear();
-                    for tab in self.tabs.values_mut() {
-                        tab.view.clear_cache();
-                    }
+                    self.invalidate_text();
                     self.apply_window_theme();
                 }
                 Err(error) => {
@@ -3649,10 +3535,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ThemeChanged(theme) => {
                 self.system_light = theme == Theme::Light;
                 self.settings.system_light = self.system_light;
-                self.labels.clear();
-                for tab in self.tabs.values_mut() {
-                    tab.view.clear_cache();
-                }
+                self.invalidate_text();
                 self.redraw();
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
@@ -3821,42 +3704,6 @@ mod tests {
                 0 if !self.app.tabs[&self.first].loading => {
                     self.app
                         .user_event(event_loop, UserEvent::Fonts(platform::fallback_fonts()));
-                    if let Some(path) = std::env::var_os("JAME_PREVIEW_PATH") {
-                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
-                        let document = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(Rope::from_str(include_str!(
-                                "../../examples/welcome.md"
-                            ))),
-                        );
-                        let blocks = std::mem::take(&mut tab.blocks);
-                        tab.blocks.update(&tab.document.text, 0);
-                        tab.view.clear_cache();
-                        self.app.frame(event_loop);
-                        let width = self.app.renderer.width;
-                        let height = self.app.renderer.height;
-                        let mut bytes = Vec::new();
-                        bytes.extend_from_slice(b"BM");
-                        bytes.extend_from_slice(&(54 + width * height * 4).to_le_bytes());
-                        bytes.extend_from_slice(&[0; 4]);
-                        bytes.extend_from_slice(&54u32.to_le_bytes());
-                        bytes.extend_from_slice(&40u32.to_le_bytes());
-                        bytes.extend_from_slice(&width.to_le_bytes());
-                        bytes.extend_from_slice(&height.to_le_bytes());
-                        bytes.extend_from_slice(&1u16.to_le_bytes());
-                        bytes.extend_from_slice(&32u16.to_le_bytes());
-                        bytes.extend_from_slice(&[0; 24]);
-                        for row in self.app.renderer.pixels().chunks(width as usize).rev() {
-                            for pixel in row {
-                                bytes.extend_from_slice(&pixel.to_le_bytes());
-                            }
-                        }
-                        std::fs::write(path, bytes).unwrap();
-                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
-                        tab.document = document;
-                        tab.blocks = blocks;
-                        tab.view.clear_cache();
-                    }
                     self.app.frame(event_loop);
                     assert!(!self.app.tabs[&self.first].view.tiles.is_empty());
                     let before = self.app.tabs[&self.first].document.text.clone();
@@ -3889,7 +3736,7 @@ mod tests {
                     self.app.command(Command::Undo);
                     assert_eq!(self.app.tabs[&self.first].document.text, before);
                     self.app.command(Command::Redo);
-                    self.app.split_pane(false, None);
+                    self.app.split_pane_at(false, false, None);
                     self.second = self.app.open_relative("second.md".into(), 0).unwrap();
                     self.phase = 1;
                 }
@@ -3902,7 +3749,7 @@ mod tests {
                         self.app.split.pane(target).unwrap().tabs,
                         vec![self.second, self.first]
                     );
-                    self.app.split_pane(true, None);
+                    self.app.split_pane_at(true, false, None);
                     let empty = self.app.active_id().unwrap();
                     self.app.close_tab(empty, true);
                     assert!(matches!(self.app.split, Split::Pane(_)));
