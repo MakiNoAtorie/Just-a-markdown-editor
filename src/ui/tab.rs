@@ -1,4 +1,4 @@
-use crate::core::{buffer::Document, markdown::BlockIndex, storage::Storage};
+use crate::core::{buffer::Document, markdown::BlockIndex, storage::LocalStorage};
 use crate::ui::editor::EditorView;
 use ropey::Rope;
 use std::{path::PathBuf, sync::Arc, time::Instant};
@@ -9,7 +9,7 @@ pub struct Tab {
     pub document: Document,
     pub view: EditorView,
     pub blocks: BlockIndex,
-    pub storage: Option<Arc<dyn Storage>>,
+    pub storage: Option<Arc<LocalStorage>>,
     pub path: Option<PathBuf>,
     pub root: Option<PathBuf>,
     pub watcher: Option<notify::RecommendedWatcher>,

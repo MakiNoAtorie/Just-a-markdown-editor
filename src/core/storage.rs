@@ -24,32 +24,6 @@ pub struct Entry {
     pub directory: bool,
 }
 
-/// Every document operation, including watching, goes through this boundary.
-pub trait Storage: Send + Sync {
-    fn read(&self, path: &Path, sink: ReadSink);
-    fn write(&self, path: &Path, text: &Rope) -> io::Result<()>;
-    fn list(&self, path: &Path) -> io::Result<Vec<Entry>>;
-    fn watch(&self, changed: Arc<dyn Fn(PathBuf) + Send + Sync>) -> io::Result<RecommendedWatcher>;
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
-    fn trash(&self, path: &Path) -> io::Result<()>;
-    fn create(&self, path: &Path, folder: bool) -> io::Result<()>;
-    fn write_checked(&self, path: &Path, text: &Rope, expected: &Rope) -> io::Result<Option<Rope>> {
-        let disk = match read_complete(self, path) {
-            Ok(disk) => disk,
-            // The file was deleted outside the app: write it again so the edits are kept.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return self.write(path, text).map(|_| None);
-            }
-            Err(error) => return Err(error),
-        };
-        if disk != *expected {
-            return Ok(Some(disk));
-        }
-        self.write(path, text)?;
-        Ok(None)
-    }
-}
-
 pub struct LocalStorage {
     root: PathBuf,
 }
@@ -98,9 +72,7 @@ impl LocalStorage {
         }
         Ok(target)
     }
-}
-impl Storage for LocalStorage {
-    fn read(&self, path: &Path, sink: ReadSink) {
+    pub fn read(&self, path: &Path, sink: ReadSink) {
         let storage = Self::new(self.root.clone());
         let path = path.to_path_buf();
         std::thread::spawn(move || {
@@ -113,7 +85,7 @@ impl Storage for LocalStorage {
             }
         });
     }
-    fn write(&self, path: &Path, text: &Rope) -> io::Result<()> {
+    pub fn write(&self, path: &Path, text: &Rope) -> io::Result<()> {
         let mut target = self.resolve(path)?;
         // Write through a symlink to its file instead of replacing the link.
         if target.is_symlink() {
@@ -150,7 +122,7 @@ impl Storage for LocalStorage {
         }
         result
     }
-    fn list(&self, path: &Path) -> io::Result<Vec<Entry>> {
+    pub fn list(&self, path: &Path) -> io::Result<Vec<Entry>> {
         let directory = if valid_relative(path)
             && path.components().all(|c| c == std::path::Component::CurDir)
         {
@@ -178,7 +150,7 @@ impl Storage for LocalStorage {
             })
             .collect()
     }
-    fn watch(&self, changed: Arc<dyn Fn(PathBuf) + Send + Sync>) -> io::Result<RecommendedWatcher> {
+    pub fn watch(&self, changed: Arc<dyn Fn(PathBuf) + Send + Sync>) -> io::Result<RecommendedWatcher> {
         let root = self.root.canonicalize()?;
         let base = root.clone();
         let mut watcher =
@@ -199,7 +171,7 @@ impl Storage for LocalStorage {
             .map_err(io::Error::other)?;
         Ok(watcher)
     }
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let target = self.resolve(to)?;
         let source = self.resolve(from)?;
         // A case-only rename finds the same file on Windows.
@@ -212,10 +184,10 @@ impl Storage for LocalStorage {
         }
         fs::rename(source, target)
     }
-    fn trash(&self, path: &Path) -> io::Result<()> {
+    pub fn trash(&self, path: &Path) -> io::Result<()> {
         crate::platform::recycle(&self.resolve(path)?)
     }
-    fn create(&self, path: &Path, folder: bool) -> io::Result<()> {
+    pub fn create(&self, path: &Path, folder: bool) -> io::Result<()> {
         let target = self.resolve(path)?;
         if folder {
             fs::create_dir(target)
@@ -227,25 +199,39 @@ impl Storage for LocalStorage {
                 .sync_all()
         }
     }
-}
-
-pub fn read_complete<S: Storage + ?Sized>(storage: &S, path: &Path) -> io::Result<Rope> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    storage.read(
-        path,
-        Arc::new(move |event| {
-            let _ = sender.send(event);
-        }),
-    );
-    let mut text = Rope::new();
-    while let Ok(event) = receiver.recv() {
-        match event {
-            ReadEvent::Chunk(chunk) => text.append(chunk),
-            ReadEvent::Complete => return Ok(text),
-            ReadEvent::Error(error) => return Err(error),
+    pub fn write_checked(&self, path: &Path, text: &Rope, expected: &Rope) -> io::Result<Option<Rope>> {
+        let disk = match self.read_complete(path) {
+            Ok(disk) => disk,
+            // The file was deleted outside the app: write it again so the edits are kept.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return self.write(path, text).map(|_| None);
+            }
+            Err(error) => return Err(error),
+        };
+        if disk != *expected {
+            return Ok(Some(disk));
         }
+        self.write(path, text)?;
+        Ok(None)
     }
-    Err(io::Error::other("File loader stopped"))
+    pub fn read_complete(&self, path: &Path) -> io::Result<Rope> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.read(
+            path,
+            Arc::new(move |event| {
+                let _ = sender.send(event);
+            }),
+        );
+        let mut text = Rope::new();
+        while let Ok(event) = receiver.recv() {
+            match event {
+                ReadEvent::Chunk(chunk) => text.append(chunk),
+                ReadEvent::Complete => return Ok(text),
+                ReadEvent::Error(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("File loader stopped"))
+    }
 }
 
 fn stream_utf8(mut file: impl Read, sink: &dyn Fn(ReadEvent)) -> io::Result<()> {

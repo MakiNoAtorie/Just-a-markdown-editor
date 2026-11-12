@@ -1,7 +1,7 @@
 use just_a_markdown_editor::{
     core::{buffer::Document, config::Settings, markdown::BlockIndex},
     platform,
-    render::{CpuRenderer, Rect, Renderer},
+    render::{CpuRenderer, Rect},
     ui::editor::EditorView,
 };
 use ropey::{Rope, RopeBuilder};

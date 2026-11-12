@@ -1,6 +1,5 @@
 use std::path::{Component, Path};
 
-/// Storage and future sync providers share this workspace-relative path boundary.
 pub fn valid_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && path
@@ -28,7 +27,7 @@ pub fn fuzzy(query: &str, candidate: &str) -> Option<i32> {
     }
     Some(score - candidate.len().min(100) as i32 / 8)
 }
-pub fn index(storage: &dyn super::storage::Storage) -> Vec<std::path::PathBuf> {
+pub fn index(storage: &super::storage::LocalStorage) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![std::path::PathBuf::from(".")];
     while let Some(folder) = pending.pop() {

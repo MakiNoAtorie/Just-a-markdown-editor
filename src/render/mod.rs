@@ -22,62 +22,6 @@ impl Rect {
         }
     }
 }
-pub trait Renderer {
-    fn resize(&mut self, width: u32, height: u32);
-    fn fill(&mut self, rect: Rect, color: u32);
-    fn text(&mut self, fonts: &mut FontSystem, buffer: &mut Buffer, x: i32, y: i32, clip: Rect);
-    fn pixels(&self) -> &[u32];
-    fn damage(&mut self) -> Vec<Rect>;
-    /// Blends `color` over `rect` (alpha 0-255); used to dim the window behind dialogs.
-    fn shade(&mut self, rect: Rect, color: u32, alpha: u32);
-    fn fill_round(&mut self, rect: Rect, radius: u32, color: u32) {
-        let r = radius.min(rect.width / 2).min(rect.height / 2) as i32;
-        if r == 0 {
-            return self.fill(rect, color);
-        }
-        let (w, h) = (rect.width as i32, rect.height as i32);
-        self.fill(
-            Rect {
-                y: rect.y + r,
-                height: (h - 2 * r) as u32,
-                ..rect
-            },
-            color,
-        );
-        for dy in 0..r {
-            let d = (r - dy) as f32 - 0.5;
-            let inset = r - ((r * r) as f32 - d * d).max(0.).sqrt().round() as i32;
-            let row = Rect {
-                x: rect.x + inset,
-                y: rect.y + dy,
-                width: (w - 2 * inset).max(0) as u32,
-                height: 1,
-            };
-            self.fill(row, color);
-            self.fill(
-                Rect {
-                    y: rect.y + h - 1 - dy,
-                    ..row
-                },
-                color,
-            );
-        }
-    }
-    /// A rounded box with a one-pixel border.
-    fn framed(&mut self, rect: Rect, radius: u32, fill: u32, border: u32) {
-        self.fill_round(rect, radius, border);
-        self.fill_round(
-            Rect {
-                x: rect.x + 1,
-                y: rect.y + 1,
-                width: rect.width.saturating_sub(2),
-                height: rect.height.saturating_sub(2),
-            },
-            radius.saturating_sub(1),
-            fill,
-        );
-    }
-}
 pub struct CpuRenderer {
     pub width: u32,
     pub height: u32,
@@ -105,9 +49,7 @@ impl CpuRenderer {
         let pixel = &mut self.pixels[y as usize * self.width as usize + x as usize];
         *pixel = theme::mix(*pixel, color, coverage);
     }
-}
-impl Renderer for CpuRenderer {
-    fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32) {
         if self.width != width || self.height != height {
             self.width = width;
             self.height = height;
@@ -121,7 +63,7 @@ impl Renderer for CpuRenderer {
             });
         }
     }
-    fn fill(&mut self, rect: Rect, color: u32) {
+    pub fn fill(&mut self, rect: Rect, color: u32) {
         let left = rect.x.max(0).min(self.width as i32) as usize;
         let right = (rect.x + rect.width as i32).max(0).min(self.width as i32) as usize;
         let top = rect.y.max(0).min(self.height as i32) as usize;
@@ -134,7 +76,7 @@ impl Renderer for CpuRenderer {
         }
         self.dirty.push(rect);
     }
-    fn text(&mut self, fonts: &mut FontSystem, buffer: &mut Buffer, x: i32, y: i32, clip: Rect) {
+    pub fn text(&mut self, fonts: &mut FontSystem, buffer: &mut Buffer, x: i32, y: i32, clip: Rect) {
         self.dirty.push(clip);
         let width = self.width as i32;
         let height = self.height as i32;
@@ -183,10 +125,10 @@ impl Renderer for CpuRenderer {
             self.glyphs.image_cache.clear();
         }
     }
-    fn pixels(&self) -> &[u32] {
+    pub fn pixels(&self) -> &[u32] {
         &self.pixels
     }
-    fn fill_round(&mut self, rect: Rect, radius: u32, color: u32) {
+    pub fn fill_round(&mut self, rect: Rect, radius: u32, color: u32) {
         let radius = radius.min(rect.width / 2).min(rect.height / 2) as f32;
         let edge = radius.floor() as i32;
         if edge < 1 {
@@ -229,7 +171,8 @@ impl Renderer for CpuRenderer {
         }
         self.dirty.push(rect);
     }
-    fn shade(&mut self, rect: Rect, color: u32, alpha: u32) {
+    /// Blends `color` over `rect` (alpha 0-255); used to dim the window behind dialogs.
+    pub fn shade(&mut self, rect: Rect, color: u32, alpha: u32) {
         let clipped = rect.intersect(Rect {
             x: 0,
             y: 0,
@@ -248,7 +191,7 @@ impl Renderer for CpuRenderer {
         }
         self.dirty.push(rect);
     }
-    fn damage(&mut self) -> Vec<Rect> {
+    pub fn damage(&mut self) -> Vec<Rect> {
         let full = Rect {
             x: 0,
             y: 0,
@@ -271,5 +214,19 @@ impl Renderer for CpuRenderer {
             bounds.height = (bottom - bounds.y) as u32;
         }
         vec![bounds]
+    }
+    /// A rounded box with a one-pixel border.
+    pub fn framed(&mut self, rect: Rect, radius: u32, fill: u32, border: u32) {
+        self.fill_round(rect, radius, border);
+        self.fill_round(
+            Rect {
+                x: rect.x + 1,
+                y: rect.y + 1,
+                width: rect.width.saturating_sub(2),
+                height: rect.height.saturating_sub(2),
+            },
+            radius.saturating_sub(1),
+            fill,
+        );
     }
 }

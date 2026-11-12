@@ -4,7 +4,7 @@ use crate::{
         config::Settings,
         markdown::{self, BlockIndex, Presentation, RowKind, Style},
     },
-    render::{self, Rect, Renderer},
+    render::{self, CpuRenderer, Rect},
 };
 use cosmic_text::{
     Attrs, BidiParagraphs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, Weight, Wrap,
@@ -71,12 +71,6 @@ pub struct EditorView {
     scrolled: (usize, u64),
     /// Sorted char ranges to tint, e.g. every match of the find bar.
     pub highlights: Vec<(usize, usize)>,
-}
-fn blend(a: u32, b: u32, t: f32) -> u32 {
-    let channel = |s: u32| {
-        ((((a >> s) & 255) as f32) * (1. - t) + (((b >> s) & 255) as f32) * t).round() as u32
-    };
-    channel(16) << 16 | channel(8) << 8 | channel(0)
 }
 fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
     let palette = render::theme::Palette::new(settings.light(), settings.accent_color());
@@ -379,7 +373,7 @@ impl EditorView {
             self.cache.pop_front();
         }
     }
-    pub fn paint(&mut self, doc: &Document, fonts: &mut FontSystem, renderer: &mut impl Renderer) {
+    pub fn paint(&mut self, doc: &Document, fonts: &mut FontSystem, renderer: &mut CpuRenderer) {
         let Some(rect) = self.rect else {
             return;
         };
@@ -467,7 +461,7 @@ impl EditorView {
                         let at = self.highlights.partition_point(|(start, _)| *start <= source);
                         at > 0 && source < self.highlights[at - 1].1
                     } {
-                        Some(blend(self.palette.background, self.palette.accent, 0.38))
+                        Some(render::theme::mix(self.palette.background, self.palette.accent, 0.38))
                     } else if glyph.metadata & 1 != 0 {
                         Some(self.palette.code)
                     } else {

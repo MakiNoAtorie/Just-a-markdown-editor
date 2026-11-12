@@ -1237,7 +1237,7 @@ impl App {
         let pending = overlay.pending;
         let (selected, scroll) = (overlay.selected, overlay.scroll);
         let searching = kind == Kind::FolderSearch;
-        let keymap = matches!(kind, Kind::Keymap | Kind::Palette | Kind::HeadingLevels);
+        let keymap = matches!(kind, Kind::Keymap | Kind::Palette);
         let width = window.width.saturating_sub(self.su(40.)).min(self.su(720.));
         let x = (window.width - width) as i32 / 2;
         let y = top + self.s(40.);

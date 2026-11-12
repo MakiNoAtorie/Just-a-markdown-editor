@@ -4,12 +4,12 @@ use crate::{
         commands::{self, COMMANDS, Command},
         config::{Session, SessionSplit, SessionTab, Settings, WindowState},
         markdown::{self, BlockIndex},
-        storage::{Entry, LocalStorage, ReadEvent, Storage, read_complete},
+        storage::{Entry, LocalStorage, ReadEvent},
         workspace,
     },
     platform::{self, Clipboard},
     render::{
-        CpuRenderer, Rect, Renderer,
+        CpuRenderer, Rect,
         theme::{Palette, color},
     },
     ui::{
@@ -156,7 +156,7 @@ pub struct App {
     next_id: u64,
     scanner: mpsc::Sender<Scan>,
     root: Option<PathBuf>,
-    storage: Option<Arc<dyn Storage>>,
+    storage: Option<Arc<LocalStorage>>,
     watcher: Option<notify::RecommendedWatcher>,
     generation: u64,
     tree: BTreeMap<PathBuf, Vec<Entry>>,
@@ -181,7 +181,7 @@ pub struct App {
     preedit: String,
     status: String,
     search_version: Arc<AtomicU64>,
-    config_storage: Arc<dyn Storage>,
+    config_storage: Arc<LocalStorage>,
     config_watcher: Option<notify::RecommendedWatcher>,
     session_closing: bool,
     after_save: Option<Kind>,
@@ -257,7 +257,7 @@ impl App {
                 ));
             }
         });
-        let config_storage: Arc<dyn Storage> =
+        let config_storage =
             Arc::new(LocalStorage::new(platform::data_directory()));
         let mut tabs = BTreeMap::new();
         tabs.insert(1, Tab::new(1));
@@ -462,7 +462,7 @@ impl App {
         self.dirty_session();
         self.generation += 1;
         self.root = Some(root.clone());
-        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(root));
+        let storage = Arc::new(LocalStorage::new(root));
         self.storage = Some(storage.clone());
         self.watcher = None;
         self.tree.clear();
@@ -482,7 +482,7 @@ impl App {
     /// Starts a watcher off the UI thread; `changed` maps each changed path to an optional event.
     fn spawn_watch(
         &self,
-        storage: Arc<dyn Storage>,
+        storage: Arc<LocalStorage>,
         changed: impl Fn(PathBuf) -> Option<UserEvent> + Send + Sync + 'static,
         watched: impl FnOnce(notify::RecommendedWatcher) -> UserEvent + Send + 'static,
     ) {
@@ -560,7 +560,7 @@ impl App {
         let revision = tab.document.revision;
         let epoch = tab.disk_epoch;
         let proxy = self.proxy.clone();
-        std::thread::spawn(move || match read_complete(&*storage, &path) {
+        std::thread::spawn(move || match storage.read_complete(&path) {
             Ok(text) if text != saved => {
                 let _ = proxy.send_event(UserEvent::External(id, epoch, revision, text));
             }
@@ -890,10 +890,9 @@ impl App {
         overlay.scroll = 0;
         overlay.rows.clear();
         match &kind {
-            Kind::Palette | Kind::HeadingLevels | Kind::Keymap => {
+            Kind::Palette | Kind::Keymap => {
                 let mut rows: Vec<_> = COMMANDS
                     .iter()
-                    .filter(|c| kind != Kind::HeadingLevels || matches!(c.id, Command::Heading(_)))
                     .filter_map(|command| {
                         let score = workspace::fuzzy(&query, command.name)?;
                         let shortcut = self
@@ -1061,7 +1060,7 @@ impl App {
                                         if cancellation.load(Ordering::Relaxed) != version {
                                             return;
                                         }
-                                        if let Ok(text) = read_complete(&*storage, path) {
+                                        if let Ok(text) = storage.read_complete(path) {
                                             for (start, end, line, preview) in
                                                 workspace::find(&text, &query, case, 500 - rows.len())
                                             {
@@ -2350,7 +2349,7 @@ impl App {
                     } else {
                         tab.root
                             .clone()
-                            .map(|root| Arc::new(LocalStorage::new(root)) as Arc<dyn Storage>)
+                            .map(|root| Arc::new(LocalStorage::new(root)))
                     };
                     tab.loading = true;
                     tab.restore_cursor = Some(saved.cursor);
@@ -2666,7 +2665,7 @@ impl App {
                 let storage = self.config_storage.clone();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let settings = match read_complete(&*storage, Path::new("settings.toml")) {
+                    let settings = match storage.read_complete(Path::new("settings.toml")) {
                         Ok(text) => Settings::parse(&text.to_string()),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                             let mut settings = Settings::default();
@@ -2684,7 +2683,7 @@ impl App {
                         }
                         Err(error) => Err(error.to_string()),
                     };
-                    let session = read_complete(&*storage, Path::new("session.toml"))
+                    let session = storage.read_complete(Path::new("session.toml"))
                         .ok()
                         .and_then(|text| toml::from_str::<Session>(&text.to_string()).ok());
                     let (settings, error) = match settings {
@@ -3083,7 +3082,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let saved = read_complete(&*self.config_storage, Path::new("session.toml"))
+        let saved = self.config_storage.read_complete(Path::new("session.toml"))
             .ok()
             .and_then(|text| toml::from_str::<Session>(&text.to_string()).ok())
             .and_then(|session| session.window)
@@ -3182,7 +3181,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.root.is_none() {
                     self.set_workspace(root.clone());
                 }
-                let storage: Arc<dyn Storage> = if self.root.as_ref() == Some(&root) {
+                let storage: Arc<LocalStorage> = if self.root.as_ref() == Some(&root) {
                     self.storage.clone().unwrap()
                 } else {
                     Arc::new(LocalStorage::new(root.clone()))
@@ -3501,7 +3500,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let storage = self.config_storage.clone();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let result = read_complete(&*storage, Path::new("settings.toml"))
+                    let result = storage.read_complete(Path::new("settings.toml"))
                         .map_err(|e| e.to_string())
                         .and_then(|text| Settings::parse(&text.to_string()));
                     let _ = proxy.send_event(UserEvent::SettingsUpdated(result));
@@ -3797,11 +3796,9 @@ mod tests {
                     self.phase = 3;
                 }
                 3 if !self.app.tabs[&self.first].document.dirty() && self.app.watcher.is_some() => {
-                    let saved = read_complete(
-                        &*self.app.storage.as_ref().unwrap().clone(),
-                        Path::new("first.md"),
-                    )
-                    .unwrap();
+                    let saved = self.app.storage.as_ref().unwrap()
+                        .read_complete(Path::new("first.md"))
+                        .unwrap();
                     assert_eq!(saved, self.app.tabs[&self.first].document.text);
                     self.app
                         .storage
@@ -3920,7 +3917,7 @@ mod tests {
                     self.phase = 7;
                 }
                 7 if self.session_saved => {
-                    let text = read_complete(&*self.app.config_storage, Path::new("session.toml"))
+                    let text = self.app.config_storage.read_complete(Path::new("session.toml"))
                         .unwrap();
                     let session: Session = toml::from_str(&text.to_string()).unwrap();
                     self.app.clear_tabs();
