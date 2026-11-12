@@ -416,6 +416,9 @@ impl Document {
                 } else {
                     spaces
                 };
+                if remove == 0 {
+                    return;
+                }
                 self.replace(start..start + remove, "");
                 self.select(range.start.saturating_sub(remove).max(start), false);
             } else {
@@ -444,6 +447,9 @@ impl Document {
                 }
             })
             .collect();
+        if output == source {
+            return;
+        }
         self.replace(start..end, &output);
         if range.is_empty() {
             self.select(

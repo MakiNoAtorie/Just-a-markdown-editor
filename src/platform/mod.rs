@@ -184,7 +184,9 @@ pub fn recycle(path: &Path) -> std::io::Result<()> {
     let mut operation: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
     operation.wFunc = FO_DELETE;
     operation.pFrom = from.as_ptr();
-    operation.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16;
+    // Ask before a permanent delete when the Recycle Bin cannot take the file.
+    operation.fFlags =
+        (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING) as u16;
     let code = unsafe { SHFileOperationW(&mut operation) };
     if code != 0 || operation.fAnyOperationsAborted != 0 {
         return Err(std::io::Error::other(format!("Could not move to the Recycle Bin (code {code})")));

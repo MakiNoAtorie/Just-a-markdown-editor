@@ -50,7 +50,14 @@ impl Pane {
         self.tabs.get(self.active).copied()
     }
     pub fn remove(&mut self, tab: u64) {
-        self.tabs.retain(|t| *t != tab);
+        let Some(index) = self.tabs.iter().position(|t| *t == tab) else {
+            return;
+        };
+        self.tabs.remove(index);
+        // Closing a tab left of the active one must keep the same tab active.
+        if index < self.active {
+            self.active -= 1;
+        }
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 }
@@ -222,6 +229,14 @@ mod tests {
         tree.remove_empty();
         assert!(tree.pane(2).is_none());
         assert_eq!(tree.pane(3).unwrap().tab(), Some(30));
+    }
+    #[test]
+    fn closing_a_left_tab_keeps_the_active_tab() {
+        let mut pane = Pane { id: 1, tabs: vec![10, 11, 12], active: 1 };
+        pane.remove(10);
+        assert_eq!(pane.tab(), Some(11));
+        pane.remove(11);
+        assert_eq!(pane.tab(), Some(12));
     }
     #[test]
     fn dividers_resize_by_path() {

@@ -214,7 +214,7 @@ fn word_bounds(text: &Rope, pos: usize) -> (usize, usize) {
     let len = text.len_chars();
     let pos = pos.min(len);
     let word = |c: char| c.is_alphanumeric() || c == '_';
-    let probe = if pos < len && text.char(pos) != '\n' {
+    let probe = if pos < len && !matches!(text.char(pos), '\n' | '\r') {
         text.char(pos)
     } else if pos > 0 {
         text.char(pos - 1)
@@ -1725,7 +1725,8 @@ impl App {
                     o.caret = None;
                 }
             }
-            Key::Character(_)
+            // winit reports space as a named key and a repeated dead key as Dead, both with text.
+            Key::Character(_) | Key::Named(NamedKey::Space) | Key::Dead(_)
                 if editable && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
             {
                 if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
@@ -2205,13 +2206,14 @@ impl App {
             }
             Key::Named(NamedKey::End) => {
                 let line = tab.document.text.char_to_line(tab.document.cursor);
+                let line_start = tab.document.text.line_to_char(line);
                 let mut end = if primary || line + 1 == tab.document.text.len_lines() {
                     tab.document.text.len_chars()
                 } else {
                     tab.document.text.line_to_char(line + 1)
                 };
                 if !primary {
-                    while end > 0 && matches!(tab.document.text.char(end - 1), '\n' | '\r') {
+                    while end > line_start && matches!(tab.document.text.char(end - 1), '\n' | '\r') {
                         end -= 1;
                     }
                 }
@@ -2241,7 +2243,7 @@ impl App {
                 tab.document.enter();
                 edited = true;
             }
-            Key::Character(_)
+            Key::Character(_) | Key::Named(NamedKey::Space) | Key::Dead(_)
                 if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() && !tab.loading =>
             {
                 if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
@@ -2258,25 +2260,25 @@ impl App {
     }
     fn session_split(&self, split: &Split) -> SessionSplit {
         match split {
-            Split::Pane(pane) => SessionSplit::Pane {
-                active: pane.active,
-                tabs: pane
-                    .tabs
-                    .iter()
-                    .filter_map(|id| {
-                        let tab = self.tabs.get(id)?;
-                        Some(SessionTab {
-                            root: tab
-                                .root
-                                .clone()
-                                .filter(|root| Some(root) != self.root.as_ref()),
-                            path: tab.path.clone()?,
-                            cursor: tab.document.cursor,
-                            top: tab.view.top,
-                        })
-                    })
-                    .collect(),
-            },
+            Split::Pane(pane) => {
+                // Untitled tabs are not saved, so the active index counts only saved tabs.
+                let mut active = 0;
+                let mut tabs = Vec::new();
+                for (index, id) in pane.tabs.iter().enumerate() {
+                    let Some(tab) = self.tabs.get(id) else { continue };
+                    let Some(path) = tab.path.clone() else { continue };
+                    if index <= pane.active {
+                        active = tabs.len();
+                    }
+                    tabs.push(SessionTab {
+                        root: tab.root.clone().filter(|root| Some(root) != self.root.as_ref()),
+                        path,
+                        cursor: tab.document.cursor,
+                        top: tab.view.top,
+                    });
+                }
+                SessionSplit::Pane { active, tabs }
+            }
             Split::Branch {
                 down,
                 ratio,
@@ -2821,7 +2823,10 @@ impl App {
                 };
             }
         }
-        self.drag = Some(Drag::Selection(id));
+        // A drag would move the cursor and shrink a word or line selection.
+        if count == 1 {
+            self.drag = Some(Drag::Selection(id));
+        }
     }
     fn mouse_down(&mut self, button: MouseButton) {
         self.dirty_session();
@@ -3175,7 +3180,15 @@ impl ApplicationHandler<UserEvent> for App {
                 let (root, relative) = self
                     .root
                     .as_ref()
-                    .and_then(|root| Some((root.clone(), path.strip_prefix(root).ok()?.to_path_buf())))
+                    .and_then(|root| {
+                        // The dialog path is canonical (\\?\C:\...); the root may not be.
+                        let canonical = root.canonicalize().ok();
+                        let relative = path
+                            .strip_prefix(root)
+                            .ok()
+                            .or_else(|| path.strip_prefix(canonical.as_ref()?).ok())?;
+                        Some((root.clone(), relative.to_path_buf()))
+                    })
                     .unwrap_or_else(|| {
                         (
                             path.parent().unwrap_or(Path::new(".")).to_path_buf(),
@@ -3742,6 +3755,10 @@ mod tests {
                     self.app.command(Command::Undo);
                     assert_eq!(self.app.tabs[&self.first].document.text, before);
                     self.app.command(Command::Redo);
+                    self.app.key(Key::Named(NamedKey::Space), "space".into(), Some(" "));
+                    let typed = self.app.tabs[&self.first].document.text.to_string();
+                    assert!(typed.ends_with("日本語 "), "space key did not type");
+                    self.app.command(Command::Undo);
                     self.app.split_pane_at(false, false, None);
                     self.second = self.app.open_relative("second.md".into(), 0).unwrap();
                     self.phase = 1;
