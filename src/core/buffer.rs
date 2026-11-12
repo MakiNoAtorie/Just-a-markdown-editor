@@ -1,5 +1,13 @@
 use ropey::Rope;
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    ops::Range,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+/// Bytes of text the undo log may hold before the oldest steps are dropped.
+/// Global because every open document shares the `undo_limit_mb` setting.
+pub static UNDO_LIMIT: AtomicUsize = AtomicUsize::new(50 * 1024 * 1024);
 
 #[derive(Clone, Debug)]
 pub struct Edit {
@@ -12,6 +20,12 @@ pub struct Edit {
     after_state: u64,
 }
 
+impl Edit {
+    fn bytes(&self) -> usize {
+        self.removed.len_bytes() + self.inserted.len_bytes()
+    }
+}
+
 pub struct Document {
     pub text: Rope,
     pub cursor: usize,
@@ -19,7 +33,8 @@ pub struct Document {
     pub revision: u64,
     pub line_ending: &'static str,
     pub changed: Range<usize>,
-    undo: Vec<Edit>,
+    undo: VecDeque<Edit>,
+    undo_bytes: usize,
     redo: Vec<Edit>,
     saved: Rope,
     state: u64,
@@ -48,7 +63,8 @@ impl Document {
             revision: 0,
             line_ending,
             changed: 0..1,
-            undo: Vec::new(),
+            undo: VecDeque::new(),
+            undo_bytes: 0,
             redo: Vec::new(),
             state: 0,
             saved_state: 0,
@@ -92,7 +108,7 @@ impl Document {
         self.cursor = range.start + inserted.len_chars();
         self.anchor = self.cursor;
         self.changed = changed_line..self.text.char_to_line(self.cursor) + 1;
-        self.undo.push(Edit {
+        self.push_undo(Edit {
             start: range.start,
             removed,
             inserted,
@@ -102,6 +118,12 @@ impl Document {
             after_state: self.revision + 1,
         });
         self.redo.clear();
+        // Keep the newest step even if it alone is over the limit, so a huge paste can be undone.
+        let limit = UNDO_LIMIT.load(Ordering::Relaxed);
+        while self.undo_bytes > limit && self.undo.len() > 1 {
+            let oldest = self.undo.pop_front().unwrap();
+            self.undo_bytes -= oldest.bytes();
+        }
         self.revision += 1;
         self.state = self.revision;
         self.states.insert(self.revision, self.state);
@@ -119,8 +141,13 @@ impl Document {
         self.changed = changed_line..self.text.char_to_line(start + replacement.len_chars()) + 1;
         self.revision += 1;
     }
+    fn push_undo(&mut self, edit: Edit) {
+        self.undo_bytes += edit.bytes();
+        self.undo.push_back(edit);
+    }
     pub fn undo(&mut self) {
-        if let Some(edit) = self.undo.pop() {
+        if let Some(edit) = self.undo.pop_back() {
+            self.undo_bytes -= edit.bytes();
             self.apply(
                 edit.start,
                 edit.inserted.len_chars(),
@@ -142,7 +169,7 @@ impl Document {
             );
             self.state = edit.after_state;
             self.states.insert(self.revision, self.state);
-            self.undo.push(edit);
+            self.push_undo(edit);
         }
     }
     pub fn delete(&mut self, backwards: bool) {
@@ -298,7 +325,7 @@ impl Document {
         } else {
             self.insert(text);
         }
-        if let Some(edit) = self.undo.last_mut() {
+        if let Some(edit) = self.undo.back_mut() {
             edit.after = (self.cursor, self.anchor);
         }
     }
@@ -311,7 +338,7 @@ impl Document {
         self.replace_rope(range.clone(), inserted);
         self.anchor = range.start + opening.chars().count();
         self.cursor = self.anchor + length;
-        if let Some(edit) = self.undo.last_mut() {
+        if let Some(edit) = self.undo.back_mut() {
             edit.after = (self.cursor, self.anchor);
         }
     }
@@ -395,7 +422,7 @@ impl Document {
                 self.replace(start..start, "    ");
                 self.select(range.start + 4, false);
             }
-            if let Some(edit) = self.undo.last_mut() {
+            if let Some(edit) = self.undo.back_mut() {
                 edit.after = (self.cursor, self.anchor);
             }
             return;
@@ -432,7 +459,7 @@ impl Document {
         } else {
             self.anchor = start;
         }
-        if let Some(edit) = self.undo.last_mut() {
+        if let Some(edit) = self.undo.back_mut() {
             edit.after = (self.cursor, self.anchor);
         }
     }
@@ -530,6 +557,26 @@ mod tests {
         doc.undo();
         doc.redo();
         assert_eq!(doc.selection(), selected);
+    }
+    #[test]
+    fn undo_log_drops_oldest_steps_over_limit() {
+        let limit = UNDO_LIMIT.load(Ordering::Relaxed);
+        let chunk = "x".repeat(limit / 10);
+        let mut doc = Document::default();
+        for _ in 0..15 {
+            doc.insert(&chunk);
+        }
+        assert!(doc.undo_bytes <= limit);
+        assert_eq!(doc.undo.len(), 10);
+        while !doc.undo.is_empty() {
+            doc.undo();
+        }
+        assert_eq!(doc.undo_bytes, 0);
+        assert_eq!(doc.text.len_bytes(), chunk.len() * 5);
+        assert!(doc.dirty());
+        // One step larger than the limit is still kept.
+        doc.insert(&"y".repeat(limit + 1));
+        assert_eq!(doc.undo.len(), 1);
     }
     #[test]
     fn counts_words_across_whitespace_and_chunks() {

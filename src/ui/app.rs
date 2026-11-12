@@ -364,6 +364,10 @@ impl App {
     /// Takes settings loaded from disk, keeping the live Windows light/dark state.
     fn adopt(&mut self, mut settings: Settings) {
         settings.system_light = self.system_light;
+        crate::core::buffer::UNDO_LIMIT.store(
+            settings.undo_limit_mb * 1024 * 1024,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.settings = settings;
     }
     fn title(&self) {

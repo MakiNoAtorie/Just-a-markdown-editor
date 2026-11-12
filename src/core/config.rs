@@ -15,6 +15,8 @@ pub struct Settings {
     pub max_width: Option<f32>,
     pub typewriter: bool,
     pub autosave: bool,
+    /// Megabytes of changed text each document keeps for undo.
+    pub undo_limit_mb: usize,
     pub keymap: BTreeMap<String, String>,
     /// Whether Windows is currently in light mode; only used when `theme` is "system".
     #[serde(skip)]
@@ -33,6 +35,7 @@ impl Default for Settings {
             max_width: Some(920.),
             typewriter: false,
             autosave: true,
+            undo_limit_mb: 50,
             keymap: BTreeMap::new(),
             system_light: false,
         }
@@ -52,6 +55,9 @@ impl Settings {
             .is_some_and(|w| !w.is_finite() || !(240.0..=10000.0).contains(&w))
         {
             return Err("Maximum width must be between 240 and 10000 pixels".into());
+        }
+        if !(1..=4096).contains(&settings.undo_limit_mb) {
+            return Err("Undo limit must be between 1 and 4096 MB".into());
         }
         if settings.accent.len() != 7
             || !settings.accent.starts_with('#')
