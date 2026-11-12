@@ -47,6 +47,14 @@ impl Default for Palette {
         Self::new(false, 0xd9aa72)
     }
 }
+/// Mixes two 0xRRGGBB colours; `t` 0.0 gives `a`, 1.0 gives `b`.
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let channel = |shift: u32| {
+        let (a, b) = (((a >> shift) & 255) as f32, ((b >> shift) & 255) as f32);
+        (a * (1. - t) + b * t).round() as u32
+    };
+    channel(16) << 16 | channel(8) << 8 | channel(0)
+}
 pub fn color(value: u32) -> cosmic_text::Color {
     cosmic_text::Color::rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }

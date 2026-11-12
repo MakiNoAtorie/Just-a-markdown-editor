@@ -6,6 +6,7 @@ use crate::ui::{
     menu::{self, EDITOR_MENU, MENUS, Popup, TAB_MENU, TREE_MENU},
 };
 use crate::core::markdown::Format;
+use crate::render::theme::mix;
 use cosmic_text::{Style as FontStyle, Weight};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -32,13 +33,6 @@ pub(super) const ACCENTS: [u32; 8] = [
     0xd9aa72, 0xe8864a, 0xd9534f, 0xd96aa0, 0x9b7ed8, 0x5b9bd5, 0x4fb3a5, 0x7fb069,
 ];
 
-fn mix(a: u32, b: u32, t: f32) -> u32 {
-    let channel = |shift: u32| {
-        let (a, b) = (((a >> shift) & 255) as f32, ((b >> shift) & 255) as f32);
-        (a * (1. - t) + b * t).round() as u32
-    };
-    channel(16) << 16 | channel(8) << 8 | channel(0)
-}
 /// Readable text colour on top of a solid fill.
 fn on_color(fill: u32) -> u32 {
     let luma = 0.299 * ((fill >> 16) & 255) as f32
@@ -344,13 +338,10 @@ impl App {
         }
     }
     pub(super) fn open_menu(&mut self, index: usize, anchor: Rect) {
-        self.popup = Some(Popup {
-            x: anchor.x,
-            y: anchor.y + anchor.height as i32,
-            items: MENUS[index].2,
-            menu: Some(index),
-            selected: None,
-        });
+        self.open_popup(MENUS[index].2, anchor.x, anchor.y + anchor.height as i32);
+        if let Some(popup) = &mut self.popup {
+            popup.menu = Some(index);
+        }
     }
     pub(super) fn open_popup(&mut self, items: menu::Items, x: i32, y: i32) {
         self.popup = Some(Popup {
@@ -1225,14 +1216,8 @@ impl App {
         }
         let dialog = overlay.is_dialog();
         let settings = overlay.kind == Kind::Settings;
-        let searching = matches!(overlay.kind, Kind::Find | Kind::Replace);
         self.in_modal = true;
-        if searching {
-            // Keep the document undimmed so matches stay visible behind the search box.
-            self.hits.push((window, Hit::Do(Act::Dismiss)));
-        } else {
-            self.scrim(window, !dialog || settings, p);
-        }
+        self.scrim(window, !dialog || settings, p);
         if settings {
             self.paint_settings(window, p);
         } else if dialog {
@@ -1247,24 +1232,17 @@ impl App {
             return;
         };
         let (kind, title, rows_total) = (overlay.kind.clone(), overlay.title().to_owned(), overlay.rows.len());
-        let (query, replacement, secondary, caret, case) = (
-            overlay.query.clone(),
-            overlay.replacement.clone(),
-            overlay.secondary,
-            overlay.caret,
-            overlay.case,
-        );
+        let (query, secondary, caret, case) = (overlay.query.clone(), overlay.secondary, overlay.caret, overlay.case);
         let placeholder = overlay.placeholder().to_owned();
         let pending = overlay.pending;
         let (selected, scroll) = (overlay.selected, overlay.scroll);
-        let searching = matches!(kind, Kind::Find | Kind::Replace | Kind::FolderSearch);
+        let searching = kind == Kind::FolderSearch;
         let keymap = matches!(kind, Kind::Keymap | Kind::Palette | Kind::HeadingLevels);
         let width = window.width.saturating_sub(self.su(40.)).min(self.su(720.));
         let x = (window.width - width) as i32 / 2;
         let y = top + self.s(40.);
         let (row_height, pad) = (self.su(if matches!(kind, Kind::Setting(_)) { 40. } else if keymap { 36. } else { 46. }), self.s(14.));
         let fixed = self.su(46.) + self.su(46.)
-            + if kind == Kind::Replace { self.su(46.) } else { 0 }
             + if searching { self.su(40.) } else { 0 }
             + self.su(14.);
         let room = window.height.saturating_sub(y as u32 + self.su(24.) + fixed) / row_height;
@@ -1291,11 +1269,6 @@ impl App {
         let first = field(self, cursor);
         self.field(first, &query, &placeholder, caret, !secondary, Act::Field(false), p);
         cursor += self.s(46.);
-        if kind == Kind::Replace {
-            let second = field(self, cursor);
-            self.field(second, &replacement, "Replace with…", caret, secondary, Act::Field(true), p);
-            cursor += self.s(46.);
-        }
         if searching {
             let bar = Rect { x: x + pad, y: cursor, width: width - pad as u32 * 2, height: self.su(32.) };
             let count = if pending {
@@ -1308,16 +1281,9 @@ impl App {
                 format!("{rows_total} match{}", if rows_total == 1 { "" } else { "es" })
             };
             self.put(&count, bar, 12., p.muted, Face::Normal, Align::Left);
-            let mut right = bar.x + bar.width as i32;
+            let right = bar.x + bar.width as i32;
             let case_button = Rect { x: right - self.s(104.), y: bar.y, width: self.su(104.), height: bar.height };
             self.button("Match case", case_button, Hit::Do(Act::Case), if case { Look::Active } else { Look::Outline }, p);
-            right = case_button.x - self.s(8.);
-            if kind == Kind::Replace {
-                let all = Rect { x: right - self.s(96.), width: self.su(96.), ..case_button };
-                self.button("Replace all", all, Hit::Do(Act::Replace(true)), Look::Outline, p);
-                let one = Rect { x: all.x - self.s(84.), width: self.su(76.), ..case_button };
-                self.button("Replace", one, Hit::Do(Act::Replace(false)), Look::Primary, p);
-            }
             cursor += self.s(40.);
         }
         cursor += self.s(6.);
@@ -1367,14 +1333,12 @@ impl App {
                 self.preview_font = None;
             } else if keymap {
                 self.put(&row.label, inner, 13., p.text, Face::Normal, Align::Left);
-                if keymap {
-                    if !row.hint.is_empty() || kind == Kind::Keymap {
-                        let text = if row.hint.is_empty() { "unassigned" } else { row.hint.as_str() };
-                        let cap = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
-                        let key = Rect { x: inner.x + inner.width as i32 - cap as i32, y: line.y + self.s(6.), width: cap, height: line.height.saturating_sub(self.su(12.)) };
-                        self.renderer.framed(key, self.su(4.), p.background, p.border);
-                        self.put(text, key, 12., if row.hint.is_empty() { p.muted } else { p.text }, Face::Normal, Align::Center);
-                    }
+                if !row.hint.is_empty() || kind == Kind::Keymap {
+                    let text = if row.hint.is_empty() { "unassigned" } else { row.hint.as_str() };
+                    let cap = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
+                    let key = Rect { x: inner.x + inner.width as i32 - cap as i32, y: line.y + self.s(6.), width: cap, height: line.height.saturating_sub(self.su(12.)) };
+                    self.renderer.framed(key, self.su(4.), p.background, p.border);
+                    self.put(text, key, 12., if row.hint.is_empty() { p.muted } else { p.text }, Face::Normal, Align::Center);
                 }
             } else {
                 let upper = Rect { height: line.height * 6 / 10, ..inner };
@@ -1469,7 +1433,7 @@ Type a different folder path to move it as well.", base(old)),
         let lines = message.lines().count() as u32;
         let height = self.su(46.) + lines * self.su(22.) + self.su(20.)
             + if input { self.su(52.) } else { 0 }
-            + if kind_is_shortcut(&kind) { self.su(64.) } else { 0 }
+            + if matches!(kind, Kind::Shortcut(_)) { self.su(64.) } else { 0 }
             + if note.is_empty() { 0 } else { self.su(24.) }
             + self.su(70.);
         let rect = self.dialog_box(window, 480., height, p);
@@ -1488,7 +1452,7 @@ Type a different folder path to move it as well.", base(old)),
             self.field(area, &query, self.overlay.as_ref().map_or("", |o| o.placeholder()).to_owned().as_str(), caret, true, Act::Field(false), p);
             y += self.s(46.);
         }
-        if kind_is_shortcut(&kind) {
+        if matches!(kind, Kind::Shortcut(_)) {
             let shown = if query.is_empty() { "No shortcut".to_owned() } else { query.replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }) };
             let cap = Rect { x: inner.x, y, width: inner.width, height: self.su(48.) };
             self.renderer.framed(cap, self.su(7.), p.background, p.accent);
@@ -1733,9 +1697,6 @@ Type a different folder path to move it as well.", base(old)),
     }
 }
 
-fn kind_is_shortcut(kind: &Kind) -> bool {
-    matches!(kind, Kind::Shortcut(_))
-}
 fn face_attrs(font: &str, tint: u32, face: Face) -> Attrs<'_> {
     let attrs = Attrs::new().family(Family::Name(font)).color(color(tint));
     match face {

@@ -1,13 +1,6 @@
 use cosmic_text::{Buffer, Color, FontSystem, SwashCache};
 pub mod theme;
 
-pub const BACKGROUND: u32 = 0x211e1b;
-pub const TEXT: u32 = 0xe9e2d6;
-pub const MUTED: u32 = 0x92877b;
-pub const ACCENT: u32 = 0xd9aa72;
-pub const CODE: u32 = 0x302b26;
-pub const SELECTION: u32 = 0x554332;
-
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: i32,
@@ -110,11 +103,7 @@ impl CpuRenderer {
             return;
         }
         let pixel = &mut self.pixels[y as usize * self.width as usize + x as usize];
-        let mix = |shift: u32| {
-            let (c, p) = (((color >> shift) & 255) as f32, ((*pixel >> shift) & 255) as f32);
-            (c * coverage + p * (1. - coverage)).round() as u32
-        };
-        *pixel = mix(16) << 16 | mix(8) << 8 | mix(0);
+        *pixel = theme::mix(*pixel, color, coverage);
     }
 }
 impl Renderer for CpuRenderer {
@@ -123,7 +112,7 @@ impl Renderer for CpuRenderer {
             self.width = width;
             self.height = height;
             self.pixels
-                .resize(width as usize * height as usize, BACKGROUND);
+                .resize(width as usize * height as usize, theme::Palette::default().background);
             self.dirty.push(Rect {
                 x: 0,
                 y: 0,
