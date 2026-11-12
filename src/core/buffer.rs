@@ -1,4 +1,5 @@
 use ropey::Rope;
+use unicode_segmentation::UnicodeSegmentation;
 use std::{
     collections::{BTreeMap, VecDeque},
     ops::Range,
@@ -18,6 +19,7 @@ pub struct Edit {
     pub after: (usize, usize),
     before_state: u64,
     after_state: u64,
+    typed: bool,
 }
 
 impl Edit {
@@ -116,6 +118,7 @@ impl Document {
             after: (self.cursor, self.anchor),
             before_state: self.state,
             after_state: self.revision + 1,
+            typed: false,
         });
         self.redo.clear();
         // Keep the newest step even if it alone is over the limit, so a huge paste can be undone.
@@ -172,27 +175,25 @@ impl Document {
             self.push_undo(edit);
         }
     }
-    pub fn delete(&mut self, backwards: bool) {
-        let mut range = self.selection();
-        if range.is_empty() {
-            if backwards {
-                range.start = range.start.saturating_sub(1);
-                if range.start > 0
-                    && self.text.char(range.start) == '\n'
-                    && self.text.char(range.start - 1) == '\r'
-                {
-                    range.start -= 1;
-                }
-            } else {
-                range.end = (range.end + 1).min(self.text.len_chars());
-                if range.end < self.text.len_chars()
-                    && self.text.char(range.start) == '\r'
-                    && self.text.char(range.end) == '\n'
-                {
-                    range.end += 1;
-                }
-            }
+    /// Next user-visible character boundary, so emoji, combining marks and CRLF move as one.
+    fn grapheme_step(&self, pos: usize, right: bool) -> usize {
+        // ponytail: 32-char context window; longer clusters split, read more if that matters.
+        let (start, end) = (pos.saturating_sub(32), (pos + 32).min(self.text.len_chars()));
+        let window = self.text.slice(start..end).to_string();
+        let offset = window.char_indices().nth(pos - start).map_or(window.len(), |(b, _)| b);
+        let step = if right {
+            window[offset..].graphemes(true).next()
+        } else {
+            window[..offset].graphemes(true).next_back()
+        };
+        let chars = step.map_or(0, |g| g.chars().count());
+        if right { pos + chars } else { pos - chars }
+    }
+    pub fn delete(&mut self, backwards: bool, word: bool) {
+        if self.selection().is_empty() {
+            self.horizontal(!backwards, true, word);
         }
+        let range = self.selection();
         if !range.is_empty() {
             self.replace(range, "");
         }
@@ -205,25 +206,14 @@ impl Document {
             self.cursor
         };
         if range.is_empty() || extend {
+            pos = self.grapheme_step(pos, right);
             if right {
-                pos = (pos + 1).min(self.text.len_chars());
-                if pos < self.text.len_chars()
-                    && pos > 0
-                    && self.text.char(pos - 1) == '\r'
-                    && self.text.char(pos) == '\n'
-                {
-                    pos += 1;
-                }
                 if word {
                     while pos < self.text.len_chars() && !self.text.char(pos).is_whitespace() {
                         pos += 1;
                     }
                 }
             } else {
-                pos = pos.saturating_sub(1);
-                if pos > 0 && self.text.char(pos) == '\n' && self.text.char(pos - 1) == '\r' {
-                    pos -= 1;
-                }
                 if word {
                     while pos > 0 && !self.text.char(pos - 1).is_whitespace() {
                         pos -= 1;
@@ -324,9 +314,36 @@ impl Document {
             }
         } else {
             self.insert(text);
+            self.merge_typing();
         }
         if let Some(edit) = self.undo.back_mut() {
             edit.after = (self.cursor, self.anchor);
+        }
+    }
+    /// Joins a typed insert to the typed step before it, so undo removes a word, not a letter.
+    fn merge_typing(&mut self) {
+        let Some(mut last) = self.undo.pop_back() else {
+            return;
+        };
+        last.typed = true;
+        let saved = self.saved_state;
+        let joins = |prev: &Edit| {
+            let word_start = prev.inserted.chars().last().is_some_and(char::is_whitespace)
+                && last.inserted.chars().next().is_some_and(|c| !c.is_whitespace());
+            prev.typed
+                && prev.removed.len_chars() == 0
+                && last.removed.len_chars() == 0
+                && prev.start + prev.inserted.len_chars() == last.start
+                && prev.after_state != saved
+                && !word_start
+        };
+        match self.undo.back_mut() {
+            Some(prev) if joins(prev) => {
+                prev.inserted.append(last.inserted);
+                prev.after = last.after;
+                prev.after_state = last.after_state;
+            }
+            _ => self.undo.push_back(last),
         }
     }
     pub fn surround(&mut self, opening: &str, closing: &str) {
@@ -370,6 +387,10 @@ impl Document {
         let source = self.text.slice(start..end).to_string();
         let mut output = String::new();
         for line in source.split_inclusive('\n') {
+            if line.trim().is_empty() {
+                output.push_str(line);
+                continue;
+            }
             let line = if heading {
                 line.trim_start_matches('#').trim_start_matches(' ')
             } else {
@@ -471,17 +492,18 @@ impl Document {
     }
 }
 
-/// Whitespace-separated words, like `str::split_whitespace().count()` but without copying the rope.
+/// Whitespace-separated words that hold a letter or digit, so Markdown marks such as `#` and `|` do not count.
 pub fn word_count(text: ropey::RopeSlice) -> usize {
-    let mut inside = false;
-    text.chars()
-        .filter(|c| {
-            let word = !c.is_whitespace();
-            let start = word && !inside;
-            inside = word;
-            start
-        })
-        .count()
+    let (mut count, mut counted) = (0, false);
+    for c in text.chars() {
+        if c.is_whitespace() {
+            counted = false;
+        } else if c.is_alphanumeric() && !counted {
+            count += 1;
+            counted = true;
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -590,5 +612,39 @@ mod tests {
         assert_eq!(word_count(Rope::from_str(" a  b\r\nc\t").slice(..)), 3);
         let long = "word ".repeat(5000);
         assert_eq!(word_count(Rope::from_str(&long).slice(..)), 5000);
+        assert_eq!(word_count(Rope::from_str("# Title\n| a | b |").slice(..)), 3);
+    }
+    #[test]
+    fn typing_undoes_by_word_and_keys_move_by_grapheme() {
+        let mut doc = Document::default();
+        for c in "hello world".chars() {
+            doc.type_text(&c.to_string());
+        }
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "hello ");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "");
+        doc.type_text("👍🏽");
+        doc.type_text("a\u{301}");
+        doc.delete(true, false);
+        assert_eq!(doc.text.to_string(), "👍🏽");
+        doc.horizontal(false, false, false);
+        assert_eq!(doc.cursor, 0);
+        doc.delete(false, false);
+        assert_eq!(doc.text.to_string(), "");
+        let mut doc = Document::new(Rope::from_str("one two\r\n"));
+        doc.select(7, false);
+        doc.delete(true, true);
+        assert_eq!(doc.text.to_string(), "one \r\n");
+        doc.delete(false, false);
+        assert_eq!(doc.text.to_string(), "one ");
+    }
+    #[test]
+    fn line_prefix_skips_blank_lines() {
+        let mut doc = Document::new(Rope::from_str("a\n\nb"));
+        doc.anchor = 0;
+        doc.select(4, true);
+        doc.prefix("## ", true);
+        assert_eq!(doc.text.to_string(), "## a\n\n## b");
     }
 }

@@ -596,8 +596,13 @@ impl EditorView {
         for attempt in 0..3 {
             let position = self.caret(doc.cursor);
             if let Some((x, y)) = position {
-                let step = settings.font_size * 1.65;
-                let target_y = y + if down { step * 1.5 } else { -step * 0.5 };
+                // Aim 1 px past the caret row so short rows like a table rule (3 px) are not skipped.
+                let row_end = self
+                    .tiles
+                    .iter()
+                    .find(|t| t.y <= y && y < t.y + t.height)
+                    .map_or(f32::INFINITY, |t| t.y + t.height);
+                let target_y = if down { (y + settings.font_size * 1.65).min(row_end) + 1. } else { y - 1. };
                 let desired_x = *self.desired_x.get_or_insert(x as i32);
                 if target_y >= 0. && target_y < rect.height as f32 {
                     if let Some(source) =
@@ -745,6 +750,26 @@ mod tests {
         for cursor in 0..=small.chars().count() {
             kinds(small, cursor, 300, false);
         }
+    }
+    #[test]
+    fn up_and_down_visit_the_table_rule_line() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\nx";
+        let mut doc = Document::new(Rope::from_str(text));
+        let mut blocks = BlockIndex::default();
+        blocks.update(&doc.text, 0);
+        let settings = Settings::default();
+        let mut view = EditorView::default();
+        let rect = Rect { x: 0, y: 0, width: 800, height: 600 };
+        let mut lines = Vec::new();
+        FONTS.with(|fonts| {
+            let fonts = &mut fonts.borrow_mut();
+            for motion in [Motion::Down, Motion::Down, Motion::Up, Motion::Up] {
+                view.layout(&doc, &blocks, &settings, fonts, rect);
+                view.motion(&mut doc, &blocks, &settings, fonts, motion, false);
+                lines.push(doc.text.char_to_line(doc.cursor));
+            }
+        });
+        assert_eq!(lines, [1, 2, 1, 0]);
     }
     #[test]
     fn separators_and_crlf_lay_out_one_row_per_line() {

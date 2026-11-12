@@ -383,12 +383,21 @@ impl App {
                 );
             }
         }
-        let width = (width.ceil() as u32).max(self.su(200.));
-        let height = pad * 2
-            + items
-                .iter()
-                .map(|item| if item.is_some() { row } else { separator })
-                .sum::<i32>();
+        let column_width = (width.ceil() as u32).max(self.su(200.));
+        // Popups cannot scroll, so a menu taller than the window wraps into more columns.
+        let limit = (window.height as i32 - 8).max(row + pad * 2);
+        let (mut places, mut column, mut y, mut height) = (Vec::with_capacity(items.len()), 0, pad, 0);
+        for item in items {
+            let step = if item.is_some() { row } else { separator };
+            if y + step + pad > limit && y > pad {
+                column += 1;
+                y = pad;
+            }
+            places.push((column, y));
+            y += step;
+            height = height.max(y + pad);
+        }
+        let width = column_width * (column + 1);
         let rect = Rect {
             x: left.min(window.width as i32 - width as i32 - 4).max(0),
             y: top.min(window.height as i32 - height - 4).max(0),
@@ -398,28 +407,27 @@ impl App {
         self.soft_shadow(rect);
         self.renderer.framed(rect, self.su(7.), p.raised, mix(p.border, p.text, 0.15));
         self.hits.push((rect, Hit::Do(Act::Block)));
-        let mut y = rect.y + pad;
-        for (position, item) in items.iter().enumerate() {
+        for (position, (item, &(column, y))) in items.iter().zip(&places).enumerate() {
+            let (x, y) = (rect.x + (column * column_width) as i32, rect.y + y);
             let Some(command) = item else {
                 self.renderer.fill(
                     Rect {
-                        x: rect.x + self.s(10.),
+                        x: x + self.s(10.),
                         y: y + separator / 2,
-                        width: rect.width.saturating_sub(self.su(20.)),
+                        width: column_width.saturating_sub(self.su(20.)),
                         height: 1,
                     },
                     p.border,
                 );
-                y += separator;
                 continue;
             };
             let Some(info) = menu::info(*command) else {
                 continue;
             };
             let line = Rect {
-                x: rect.x + self.s(4.),
+                x: x + self.s(4.),
                 y,
-                width: rect.width.saturating_sub(self.su(8.)),
+                width: column_width.saturating_sub(self.su(8.)),
                 height: row as u32,
             };
             let enabled = self.enabled(*command);
@@ -443,7 +451,6 @@ impl App {
                 line,
                 Hit::Do(if enabled { Act::Run(*command) } else { Act::Block }),
             ));
-            y += row;
         }
         self.in_modal = false;
     }

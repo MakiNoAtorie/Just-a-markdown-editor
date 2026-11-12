@@ -49,7 +49,7 @@ fn run(size: usize, single_line: bool, width: u32, height: u32) -> (f64, f64, f6
         if iteration % 2 == 0 {
             document.insert("x");
         } else {
-            document.delete(true);
+            document.delete(true, false);
         }
         view.layout(&document, &blocks, &settings, &mut fonts, rect);
         view.paint(&document, &mut fonts, &mut renderer);

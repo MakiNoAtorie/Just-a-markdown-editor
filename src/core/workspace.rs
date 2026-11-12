@@ -33,6 +33,10 @@ pub fn index(storage: &super::storage::LocalStorage) -> Vec<std::path::PathBuf> 
     while let Some(folder) = pending.pop() {
         if let Ok(entries) = storage.list(&folder) {
             for entry in entries {
+                // Folder links can point back up the tree and loop forever.
+                if entry.directory && entry.link {
+                    continue;
+                }
                 if entry.directory {
                     let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
                     if !name.starts_with('.')
@@ -151,5 +155,27 @@ mod tests {
         assert_eq!(find(&text, "hello", true, 10).len(), 1);
         assert_eq!(replace_all("Hello é hello", "hello", "x", false), "x é x");
         assert_eq!(replace_all("Hello é hello", "hello", "x", true), "Hello é x");
+    }
+    #[test]
+    fn index_skips_folder_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, sub) = (dir.path(), dir.path().join("a"));
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(root.join("n.md"), "x").unwrap();
+        let link = sub.join("loop");
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(root)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(root, &link).is_ok();
+        if !made {
+            return;
+        }
+        let storage = super::super::storage::LocalStorage::new(root.to_path_buf());
+        assert_eq!(index(&storage), vec![std::path::PathBuf::from("n.md")]);
     }
 }

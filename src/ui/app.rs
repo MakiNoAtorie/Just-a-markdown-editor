@@ -1643,6 +1643,20 @@ impl App {
                 }
             }
         }
+        // The docked Find/Replace bar lets app shortcuts such as Ctrl+S through.
+        if overlay.docked() && (primary || self.modifiers.alt_key()) {
+            if let Some(command) = commands::resolve(
+                &self.shortcut_key,
+                primary,
+                self.modifiers.shift_key(),
+                self.modifiers.alt_key(),
+                &self.settings.keymap,
+            ) {
+                self.command(command);
+                self.redraw();
+                return true;
+            }
+        }
         if matches!(key, Key::Named(NamedKey::Escape)) {
             self.close_overlay();
             return true;
@@ -1765,6 +1779,8 @@ impl App {
                     if let Some(text) = tab.external.take() {
                         tab.edited = None;
                         self.load_disk(id, text);
+                    } else {
+                        self.status = "The file has not changed on disk.".into();
                     }
                 }
             }
@@ -2232,11 +2248,11 @@ impl App {
                 tab.document.select(tab.view.top, shift);
             }
             Key::Named(NamedKey::Backspace) if !tab.loading => {
-                tab.document.delete(true);
+                tab.document.delete(true, primary);
                 edited = true;
             }
             Key::Named(NamedKey::Delete) if !tab.loading => {
-                tab.document.delete(false);
+                tab.document.delete(false, primary);
                 edited = true;
             }
             Key::Named(NamedKey::Enter) if !tab.loading => {

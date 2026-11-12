@@ -2,7 +2,6 @@ use super::workspace::valid_relative;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ropey::{Rope, RopeBuilder};
 use std::{
-    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Path, PathBuf},
@@ -22,6 +21,7 @@ pub type ReadSink = Arc<dyn Fn(ReadEvent) + Send + Sync>;
 pub struct Entry {
     pub path: PathBuf,
     pub directory: bool,
+    pub link: bool,
 }
 
 pub struct LocalStorage {
@@ -92,9 +92,9 @@ impl LocalStorage {
             target = target.canonicalize()?;
         }
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let mut name = OsString::from(".");
-        name.push(target.file_name().ok_or_else(|| io::Error::other("Missing file name"))?);
-        name.push(format!(".{}-{}.tmp", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        // A fixed-length name keeps long file names under the 255-character component limit.
+        let name = format!(".{}-{}.tmp", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed));
+        target.file_name().ok_or_else(|| io::Error::other("Missing file name"))?;
         let temporary = target.with_file_name(name);
         let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
         let result = (|| {
@@ -146,6 +146,7 @@ impl LocalStorage {
                     // fs::metadata follows junctions and directory symlinks.
                     directory: entry.file_type()?.is_dir()
                         || fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()),
+                    link: entry.file_type()?.is_symlink(),
                 })
             })
             .collect()
@@ -330,5 +331,14 @@ mod tests {
         fs::remove_file(root.join("gone.md")).unwrap();
         assert!(!root.join("gone.md").exists());
         fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn long_file_name_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.md", "a".repeat(250));
+        LocalStorage::new(dir.path().to_path_buf())
+            .write(Path::new(&name), &Rope::from_str("x"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), "x");
     }
 }
