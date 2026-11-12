@@ -3124,9 +3124,15 @@ impl ApplicationHandler<UserEvent> for App {
         let mut attributes = Window::default_attributes()
             .with_visible(!cfg!(test))
             .with_title(APP_NAME)
+            .with_window_icon(platform::app_icon())
             .with_theme(None)
             .with_inner_size(LogicalSize::new(1280., 800.))
             .with_min_inner_size(LogicalSize::new(440., 300.));
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attributes = attributes.with_taskbar_icon(platform::app_icon());
+        }
         if let Some(state) = saved {
             // Only reuse the position if it is still on a connected monitor.
             let on_screen = event_loop.available_monitors().any(|monitor| {

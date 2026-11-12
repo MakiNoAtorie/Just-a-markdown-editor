@@ -202,5 +202,4 @@ Leave room for these, but do not build them: rendered tables, inline images, mat
 
 ## 17. Open items
 
-- App icon.
-- Distribution: portable executable or installer.
+- None. The app icon is drawn in `build.rs`; distribution is the portable executable in `dist/`.
