@@ -49,6 +49,10 @@ impl Pane {
     pub fn tab(&self) -> Option<u64> {
         self.tabs.get(self.active).copied()
     }
+    pub fn remove(&mut self, tab: u64) {
+        self.tabs.retain(|t| *t != tab);
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Split {
@@ -77,8 +81,16 @@ impl Split {
             }
         }
     }
-    pub fn split(&mut self, id: u64, new: Pane, down: bool) -> bool {
-        self.split_at(id, new, down, false)
+    /// Pane ids in layout order.
+    pub fn pane_ids(&self) -> Vec<u64> {
+        match self {
+            Self::Pane(p) => vec![p.id],
+            Self::Branch { first, second, .. } => {
+                let mut ids = first.pane_ids();
+                ids.extend(second.pane_ids());
+                ids
+            }
+        }
     }
     /// Splits pane `id`; with `before` the new pane goes left of / above it.
     pub fn split_at(&mut self, id: u64, new: Pane, down: bool, before: bool) -> bool {
@@ -186,23 +198,25 @@ mod tests {
             tabs: vec![10],
             active: 0,
         });
-        assert!(tree.split(
+        assert!(tree.split_at(
             1,
             Pane {
                 id: 2,
                 tabs: vec![20],
                 active: 0
             },
+            false,
             false
         ));
-        assert!(tree.split(
+        assert!(tree.split_at(
             2,
             Pane {
                 id: 3,
                 tabs: vec![30],
                 active: 0
             },
-            true
+            true,
+            false
         ));
         tree.pane_mut(2).unwrap().tabs.clear();
         tree.remove_empty();
@@ -213,8 +227,8 @@ mod tests {
     fn dividers_resize_by_path() {
         let pane = |id| Pane { id, tabs: vec![id], active: 0 };
         let mut tree = Split::Pane(pane(1));
-        tree.split(1, pane(2), false);
-        tree.split(2, pane(3), true);
+        tree.split_at(1, pane(2), false, false);
+        tree.split_at(2, pane(3), true, false);
         let window = Rect { x: 0, y: 0, width: 1000, height: 600 };
         let mut dividers = Vec::new();
         tree.dividers(window, &mut Vec::new(), &mut dividers);

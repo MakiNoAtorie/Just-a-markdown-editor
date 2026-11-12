@@ -33,7 +33,6 @@ pub enum Action {
     Folder(PathBuf),
     Setting(String),
     Shortcut(String),
-    None,
 }
 #[derive(Clone)]
 pub struct Row {

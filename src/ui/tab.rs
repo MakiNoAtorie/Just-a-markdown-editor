@@ -3,6 +3,7 @@ use crate::ui::editor::EditorView;
 use ropey::Rope;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
+#[derive(Default)]
 pub struct Tab {
     pub id: u64,
     pub document: Document,
@@ -23,24 +24,7 @@ pub struct Tab {
 }
 impl Tab {
     pub fn new(id: u64) -> Self {
-        Self {
-            id,
-            document: Document::default(),
-            view: EditorView::default(),
-            blocks: BlockIndex::default(),
-            storage: None,
-            path: None,
-            root: None,
-            watcher: None,
-            loading: false,
-            failed: false,
-            saving: false,
-            edited: None,
-            external: None,
-            restore_cursor: None,
-            guard_save: false,
-            disk_epoch: 0,
-        }
+        Self { id, ..Default::default() }
     }
     pub fn name(&self) -> String {
         self.path

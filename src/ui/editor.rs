@@ -210,7 +210,7 @@ impl EditorView {
         self.tiles.clear();
         self.cache.clear();
     }
-    fn caret(&self, cursor: usize) -> Option<(f32, f32)> {
+    pub(crate) fn caret(&self, cursor: usize) -> Option<(f32, f32)> {
         // A caret at a line start is also the end of the previous tile, which has no row for it.
         self.tiles
             .iter()
@@ -676,14 +676,8 @@ impl EditorView {
             .tiles
             .last()
             .map_or(self.top, |tile| tile.start + tile.preview.end);
-        let cursor_visible = self.tiles.iter().any(|t| {
-            if doc.cursor < t.start || doc.cursor > t.start + t.preview.end {
-                return false;
-            }
-            t.buffer
-                .cursor_position(&t.display_cursor(doc.cursor))
-                .is_some_and(|(_, y)| t.y + y < self.rect.map_or(600, |r| r.height) as f32 - 30.0)
-        });
+        let height = self.rect.map_or(600, |r| r.height) as f32;
+        let cursor_visible = self.caret(doc.cursor).is_some_and(|(_, y)| y < height - 30.0);
         if doc.cursor < self.top || doc.cursor > visible_end || !cursor_visible {
             let line_start = doc.text.line_to_char(doc.text.char_to_line(doc.cursor));
             self.top = if doc.cursor - line_start > CHUNK {
